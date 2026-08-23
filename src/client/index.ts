@@ -257,11 +257,12 @@ function applyFold(): void {
   for (const turn of turns) {
     const steps = turn.filter((r) => r.getAttribute('data-chat-flow-kind') === 'assistant-step')
     const last = steps[steps.length - 1]
+    // 该轮没有最终回答行时保持原样可见，绝不整轮隐藏。
+    if (!last) continue
     for (const row of turn) {
       if (row === last) continue
       row.setAttribute('data-dsh-gc-hidden', '')
     }
-    if (!last) continue
     last.setAttribute('data-dsh-gc-folded', '')
     const hasVisible = last.innerText.trim() !== '' || last.querySelector('img:not(.dsh-gc-avatar)') !== null
     if (!hasVisible) {
@@ -284,26 +285,27 @@ function toggleGlobalFold(): void {
 }
 
 /**
- * 等待滚动停稳（窗口 + 会话滚动容器连续数帧位置不变），超时兜底后回调。
- * 用于平滑滚动结束后再测量目标行几何。
+ * 等待滚动停稳：捕获阶段监听全文档 scroll，静默 150ms 视为停稳，1200ms 兜底超时。
+ * 相比轮询固定容器，可覆盖任何实际发生滚动的祖先容器。
  */
 function waitForScrollSettle(onSettle: () => void): void {
-  const container = document.querySelector<HTMLElement>('[data-conversation-scroll]')
-  const readSig = (): string => `${window.scrollY}|${container ? container.scrollTop : ''}`
-  let last = readSig()
-  let stable = 0
-  const t0 = Date.now()
-  const tick = (): void => {
-    const cur = readSig()
-    stable = cur === last ? stable + 1 : 0
-    last = cur
-    if (stable >= 6 || Date.now() - t0 > 1000) {
-      onSettle()
-      return
-    }
-    requestAnimationFrame(tick)
+  let done = false
+  let quietTimer: number | null = null
+  let hardTimer: number
+  const finish = (): void => {
+    if (done) return
+    done = true
+    if (quietTimer !== null) window.clearTimeout(quietTimer)
+    window.clearTimeout(hardTimer)
+    document.removeEventListener('scroll', onScroll, true)
+    onSettle()
   }
-  requestAnimationFrame(tick)
+  const onScroll = (): void => {
+    if (quietTimer !== null) window.clearTimeout(quietTimer)
+    quietTimer = window.setTimeout(finish, 150)
+  }
+  hardTimer = window.setTimeout(finish, 1200)
+  document.addEventListener('scroll', onScroll, true)
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -712,17 +714,22 @@ export function apply(ctx: any): void {
     }
   })
 
-  // 2b) 顶部固定头像：滚动/缩放时重算位置与显隐
+  // 2b) 顶部固定头像：滚动时重算位置与显隐；窗口缩放额外刷新悬浮窗位置
   ctx.effect(() => {
-    const onScrollResize = (): void => {
+    const onScroll = (): void => {
       positionSticky()
       updateStickyVisibility()
     }
-    document.addEventListener('scroll', onScrollResize, true)
-    window.addEventListener('resize', onScrollResize)
+    const onResize = (): void => {
+      positionSticky()
+      updateStickyVisibility()
+      notify()
+    }
+    document.addEventListener('scroll', onScroll, true)
+    window.addEventListener('resize', onResize)
     return () => {
-      document.removeEventListener('scroll', onScrollResize, true)
-      window.removeEventListener('resize', onScrollResize)
+      document.removeEventListener('scroll', onScroll, true)
+      window.removeEventListener('resize', onResize)
       removeSticky()
     }
   })

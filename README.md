@@ -59,13 +59,31 @@ npm run build:client         # tsdown 打包 host + client
 
 - **导出路径**：受浏览器安全限制，仅支持浏览器默认下载目录，无法自定义路径。
 - **文件名**：会话日志只保留 `name`（已剥离本地路径），图片导出用文件名（+ 附件存储派生路径）指代，无法还原原始完整路径；普通文件以文本中的 `@路径` 引用原样保留。
-- **维护依赖**：折叠 / 头像层依赖 DSH 当前的稳定 DOM 属性（`data-chat-flow-kind`、`data-variant="think"`、`data-chat-call-id`），DSH 升级后需回归验证。
+- **维护依赖**：折叠 / 头像层与悬浮窗依赖 DSH 当前的稳定契约——服务名（`webServer`、`slots`、`sessionQuery`）、slot 名（`conversation.session.header.utilities`）、DOM 属性（`data-chat-flow-kind`、`data-variant="think"`、`data-chat-call-id`、`data-chat-anchor-key`、`data-conversation-scroll`）以及 Buttons 注入 props（`sessionId`、`useSession`），DSH 升级后需回归验证。
 - **转义副作用**：用户输入经严格转义后，导出文档源码中会呈现 `\-`、`\*` 等反斜杠序列与 `&lt;` 等实体，渲染显示不受影响；行首 4+ 空格缩进的输入在导出中仍会呈现为代码块。
+- **头像路径白名单**：设置中的 `avatarPath` 仅接受 `$DSH_HOME/greater-clarity/` 目录内的图片文件（安全约束，目录外路径会静默回退到上传头像 / 默认头像）；此前配置过外部路径的用户需把文件移入该目录或改用上传功能。
 
 ## 更新记录
+
+### 0.1.0 安全与健壮性批次
+
+**安全**
+1. **任意文件读取修复**：`avatarPath` 白名单限定在 greater-clarity 目录内且扩展名必须是图片，杜绝经 settings 写入任意路径后借 `/avatar` 路由读取机器文件。
+2. **路由信任校验**：移除 `Access-Control-Allow-Origin: *`；所有插件路由要求 Host 为本机回环地址（防 DNS rebinding），浏览器跨站请求的 Origin 必须与 Host 同源（防 CSRF）。外部工具经 `http://127.0.0.1:<port>` 直连不受影响。
+
+**正确性**
+3. **导出丢首轮修复**：事件流不以 `turn/start` 开头时（部分快照/回放窗口），已积累内容按独立轮输出而非丢弃。
+4. **跳转吸附容器覆盖**：滚动停稳检测改为捕获阶段监听全文档 scroll（静默 150ms 停稳 / 1200ms 兜底），不再依赖固定的 `[data-conversation-scroll]` 容器签名。
+5. **空 step 轮不再整体隐藏**：折叠分组中某轮没有最终回答行时保持该轮原样可见。
+6. **请求体超限**：以暂停读取 + 413 状态码响应取代直接断连；错误响应对已销毁套接字的二次写异常就地吞掉，消除未处理 rejection。
+7. **悬浮窗跟随窗口缩放**：HistoryPanel 打开时窗口 resize 会重算吸附位置。
+
+**健壮性**
+8. **settings.json 损坏备份**：解析失败时先把旧文件改名 `.bak` 再回默认值，不无提示覆盖。
+9. **POST 设置逐字段类型净化**：非法类型不落盘；数值字段统一 clamp。
 
 ### 0.1.0 修复批次
 
 1. **头像可见性遮挡判定**：sticky 头像显隐判断从「仅视口相交」升级为采样点命中测试（中心 + 四内对角点，`elementFromPoint` 必须命中头像自身），被 session log 栏等浮层遮挡的头像不再误判为可见。
 2. **导出 Markdown 注入防护**：新增 `escapeUserText` 全局严格转义用户输入与附件文件名，阻断伪造标题/分隔线/列表/注释及裸 HTML 注入；AI 回答不转义。
-3. **历史跳转悬浮窗吸附**：历史记录跳转平滑滚动停稳后（rAF 静默检测，1s 兜底），悬浮窗重新吸附到目标行头像旁，几何与直接点击一致。
+3. **历史跳转悬浮窗吸附**：历史记录跳转平滑滚动停稳后，悬浮窗重新吸附到目标行头像旁，几何与直接点击一致。

@@ -12,14 +12,15 @@
  * 不依赖 DSH settings provider 是否挂载，与 whale-widget/super-injector 先例一致）。
  */
 import type { Context } from 'cordis'
-import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync } from 'node:fs'
-import { join, resolve, extname, dirname } from 'node:path'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, renameSync } from 'node:fs'
+import { join, resolve, extname, dirname, sep } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const DSH_HOME = process.env.DSH_HOME || join(homedir(), '.dsh')
 const GC_DIR = join(DSH_HOME, 'greater-clarity')
+const GC_DIR_ABS = resolve(GC_DIR)
 const SETTINGS_FILE = join(GC_DIR, 'settings.json')
 const DEFAULT_AVATAR = join(PACKAGE_ROOT, 'assets', 'DSH_Avatar.png')
 
@@ -84,8 +85,40 @@ export const inject = ['webServer']
 
 const JSON_HEADERS = {
   'Content-Type': 'application/json; charset=utf-8',
-  'Access-Control-Allow-Origin': '*',
   'Cache-Control': 'no-store',
+}
+
+// 本插件路由的信任判据：Host 必须是本机回环地址（防 DNS rebinding）；
+// 浏览器发起的请求其 Origin 还须与 Host 同源（防跨站 CSRF）。非浏览器客户端无 Origin，直接放行。
+const LOCAL_HOST_RE = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i
+
+function trustedRequest(req: any): boolean {
+  const headers = req.headers || {}
+  const host = typeof headers.host === 'string' ? headers.host : ''
+  if (!LOCAL_HOST_RE.test(host)) return false
+  const origin = typeof headers.origin === 'string' ? headers.origin : ''
+  if (origin === '') return true
+  try {
+    return new URL(origin).host === host
+  } catch {
+    return false
+  }
+}
+
+function rejectUntrusted(res: any): void {
+  res.writeHead(403, JSON_HEADERS)
+  res.end(JSON.stringify({ ok: false, error: 'untrusted request origin' }))
+}
+
+/** 统一错误响应：413 保留状态码；对已销毁套接字的二次写异常就地吞掉。 */
+function respondError(res: any, err: unknown): void {
+  const code = (err as any)?.statusCode === 413 ? 413 : 400
+  try {
+    res.writeHead(code, JSON_HEADERS)
+    res.end(JSON.stringify({ ok: false, error: String((err as any)?.message ?? err) }))
+  } catch {
+    // socket already gone
+  }
 }
 
 function readSettings(): Settings {
@@ -98,6 +131,12 @@ function readSettings(): Settings {
       ai: { ...DEFAULT_SETTINGS.ai, ...ai },
     }
   } catch {
+    // 损坏的配置不静默丢弃：留一份 .bak 再回默认值。
+    try {
+      if (existsSync(SETTINGS_FILE)) renameSync(SETTINGS_FILE, SETTINGS_FILE + '.bak')
+    } catch {
+      // 备份失败也继续
+    }
     return DEFAULT_SETTINGS
   }
 }
@@ -120,7 +159,13 @@ function clampHistoryCount(n: unknown): number {
 }
 
 function resolveAvatarPath(s: Settings): string {
-  if (s.ai.avatarPath && existsSync(s.ai.avatarPath)) return s.ai.avatarPath
+  const configured = s.ai.avatarPath
+  if (configured) {
+    // 仅接受 greater-clarity 目录内的图片文件，防止经 settings 写入任意路径读取机器文件。
+    const p = resolve(configured)
+    const inDir = p.toLowerCase().startsWith(GC_DIR_ABS.toLowerCase() + sep.toLowerCase())
+    if (inDir && AVATAR_EXTS.includes(extname(p).toLowerCase()) && existsSync(p)) return p
+  }
   for (const ext of AVATAR_EXTS) {
     const up = join(GC_DIR, 'avatar' + ext)
     if (existsSync(up)) return up
@@ -145,8 +190,11 @@ function readBody(req: any): Promise<string> {
     req.on('data', (c: Buffer) => {
       size += c.length
       if (size > MAX_BODY_BYTES) {
-        reject(new Error('body too large'))
-        req.destroy()
+        // 暂停读取并携带 413 状态码拒绝，由 respondError 回应后再断开。
+        const err = new Error(`body exceeds ${MAX_BODY_BYTES} bytes`) as Error & { statusCode?: number }
+        err.statusCode = 413
+        req.pause()
+        reject(err)
         return
       }
       chunks.push(c)
@@ -221,19 +269,22 @@ function buildMarkdown(events: readonly EventLike[], title: string, createdAt: n
   out.push('')
 
   let turnNum = 0
-  let inTurn = false
   let userTexts: string[] = []
   let userImages: string[] = []
   let aiTexts: string[] = []
 
+  // 只要积累了内容就成轮输出，不依赖事件流以 turn/start 开头（部分快照/回放窗口可能缺头部事件）。
   const flush = (): void => {
-    if (!inTurn) return
-    turnNum += 1
     const userParts = [...userTexts]
     if (userImages.length > 0) userParts.push(userImages.map((i) => `![${i}](<${safeImageDest(i)}>)`).join(' '))
     const user = userParts.filter((s) => s.trim() !== '').join('\n\n').trim()
     const ai = aiTexts.join('\n\n').trim()
+    userTexts = []
+    userImages = []
+    aiTexts = []
+    if (user === '' && ai === '') return
 
+    turnNum += 1
     out.push(`## 第 ${pad(turnNum)} 轮`)
     out.push('')
     if (user) {
@@ -252,9 +303,6 @@ function buildMarkdown(events: readonly EventLike[], title: string, createdAt: n
     }
     out.push('---')
     out.push('')
-    userTexts = []
-    userImages = []
-    aiTexts = []
   }
 
   for (const ev of events) {
@@ -262,7 +310,6 @@ function buildMarkdown(events: readonly EventLike[], title: string, createdAt: n
     switch (ev.type) {
       case 'turn/start':
         flush()
-        inTurn = true
         break
       case 'user/message': {
         const src = data && data.source
@@ -283,7 +330,6 @@ function buildMarkdown(events: readonly EventLike[], title: string, createdAt: n
       }
       case 'turn/end':
         flush()
-        inTurn = false
         break
       default:
         break
@@ -306,7 +352,8 @@ export function apply(ctx: AppContext): void {
   disposers.push(ctx.webServer.register({
     kind: 'exact',
     path: '/dsh-greater-clarity/avatar',
-    handler: (_req: any, res: any) => {
+    handler: (req: any, res: any) => {
+      if (!trustedRequest(req)) return rejectUntrusted(res)
       try {
         const p = resolveAvatarPath(readSettings())
         const bytes = readFileSync(p)
@@ -317,8 +364,13 @@ export function apply(ctx: AppContext): void {
         })
         res.end(bytes)
       } catch {
-        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' })
-        res.end('avatar unavailable')
+        // 文件缺失/不可读：对已销毁套接字的写异常就地吞掉。
+        try {
+          res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' })
+          res.end('avatar unavailable')
+        } catch {
+          // socket already gone
+        }
       }
     },
   }))
@@ -328,16 +380,27 @@ export function apply(ctx: AppContext): void {
     kind: 'exact',
     path: '/dsh-greater-clarity/settings',
     handler: async (req: any, res: any) => {
+      if (!trustedRequest(req)) return rejectUntrusted(res)
       try {
         if (req.method === 'POST') {
           const patch = JSON.parse((await readBody(req)) || '{}')
-          const current = readSettings()
+          const cur = readSettings()
+          // 逐字段类型净化：非法类型不落盘，可调数值统一 clamp。
+          const expIn = patch && typeof patch.export === 'object' ? patch.export : {}
+          const aiIn = patch && typeof patch.ai === 'object' ? patch.ai : {}
           const next: Settings = {
-            export: { ...current.export, ...(patch && typeof patch.export === 'object' ? patch.export : {}) },
-            ai: { ...current.ai, ...(patch && typeof patch.ai === 'object' ? patch.ai : {}) },
+            export: {
+              showButton: typeof expIn.showButton === 'boolean' ? expIn.showButton : cur.export.showButton,
+              mode: typeof expIn.mode === 'string' ? expIn.mode : cur.export.mode,
+              targetDir: typeof expIn.targetDir === 'string' ? expIn.targetDir : cur.export.targetDir,
+            },
+            ai: {
+              showAvatar: typeof aiIn.showAvatar === 'boolean' ? aiIn.showAvatar : cur.ai.showAvatar,
+              avatarPath: typeof aiIn.avatarPath === 'string' ? aiIn.avatarPath : cur.ai.avatarPath,
+              avatarSize: 'avatarSize' in aiIn ? clampSize(aiIn.avatarSize) : cur.ai.avatarSize,
+              historyCount: 'historyCount' in aiIn ? clampHistoryCount(aiIn.historyCount) : cur.ai.historyCount,
+            },
           }
-          if (typeof next.ai.avatarSize === 'number') next.ai.avatarSize = clampSize(next.ai.avatarSize)
-          if (typeof next.ai.historyCount === 'number') next.ai.historyCount = clampHistoryCount(next.ai.historyCount)
           writeSettings(next)
           res.writeHead(200, JSON_HEADERS)
           res.end(JSON.stringify({ ok: true, settings: next }))
@@ -346,8 +409,7 @@ export function apply(ctx: AppContext): void {
           res.end(JSON.stringify({ ok: true, settings: readSettings() }))
         }
       } catch (err) {
-        res.writeHead(400, JSON_HEADERS)
-        res.end(JSON.stringify({ ok: false, error: String(err) }))
+        respondError(res, err)
       }
     },
   }))
@@ -357,6 +419,7 @@ export function apply(ctx: AppContext): void {
     kind: 'exact',
     path: '/dsh-greater-clarity/avatar-upload',
     handler: async (req: any, res: any) => {
+      if (!trustedRequest(req)) return rejectUntrusted(res)
       try {
         const payload = JSON.parse((await readBody(req)) || '{}')
         const dataUrl = payload && payload.dataUrl
@@ -375,8 +438,7 @@ export function apply(ctx: AppContext): void {
         res.writeHead(200, JSON_HEADERS)
         res.end(JSON.stringify({ ok: true, ext }))
       } catch (err) {
-        res.writeHead(400, JSON_HEADERS)
-        res.end(JSON.stringify({ ok: false, error: String(err) }))
+        respondError(res, err)
       }
     },
   }))
@@ -386,6 +448,7 @@ export function apply(ctx: AppContext): void {
     kind: 'exact',
     path: '/dsh-greater-clarity/export',
     handler: async (req: any, res: any) => {
+      if (!trustedRequest(req)) return rejectUntrusted(res)
       try {
         const payload = JSON.parse((await readBody(req)) || '{}')
         const sessionId = payload && payload.sessionId
@@ -401,8 +464,7 @@ export function apply(ctx: AppContext): void {
         res.writeHead(200, JSON_HEADERS)
         res.end(JSON.stringify({ ok: true, markdown, filename: safeFilename(title) }))
       } catch (err) {
-        res.writeHead(400, JSON_HEADERS)
-        res.end(JSON.stringify({ ok: false, error: String(err) }))
+        respondError(res, err)
       }
     },
   }))
