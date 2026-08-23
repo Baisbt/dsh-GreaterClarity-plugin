@@ -486,8 +486,11 @@ export function apply(ctx: AppContext): void {
         if (typeof sessionId !== 'string' || sessionId === '') throw new Error('missing sessionId')
         const sq = ctx.get('sessionQuery') as SessionQueryLike | undefined
         if (!sq) throw new Error('sessionQuery unavailable')
-        const snapshot = await sq.readSession(sessionId)
-        const titleSnap = await sq.readTitle(sessionId).catch(() => undefined)
+        // 快照与标题并行读取，缩短服务端兜底路径的耗时。
+        const [snapshot, titleSnap] = await Promise.all([
+          sq.readSession(sessionId),
+          sq.readTitle(sessionId).catch(() => undefined),
+        ])
         const title = (titleSnap && titleSnap.title) || (typeof payload.title === 'string' ? payload.title : '') || '会话'
         const now = typeof payload.now === 'number' ? payload.now : Date.now()
         const tzOffsetMin = typeof payload.tzOffsetMin === 'number' ? payload.tzOffsetMin : -new Date().getTimezoneOffset()

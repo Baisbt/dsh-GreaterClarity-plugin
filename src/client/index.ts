@@ -99,6 +99,26 @@ function triggerDownload(markdown: string, filename: string): void {
   setTimeout(() => { URL.revokeObjectURL(url) }, 1000)
 }
 
+/** 服务端兜底导出：Host 读盘构建完整文档（客户端快照不可用时走这里）。 */
+function exportViaServer(sessionId: string | undefined): void {
+  if (!sessionId || busyExport) return
+  busyExport = true
+  notify()
+  fetchJson('/export', { method: 'POST', body: JSON.stringify({ sessionId, now: Date.now(), tzOffsetMin: -new Date().getTimezoneOffset() }) })
+    .then((d) => {
+      if (d && d.ok && d.markdown) {
+        triggerDownload(d.markdown, d.filename || '会话.md')
+      } else {
+        window.alert('导出失败：' + ((d && d.error) || '未知错误'))
+      }
+    })
+    .catch((e) => { window.alert('导出失败：' + String(e)) })
+    .finally(() => {
+      busyExport = false
+      notify()
+    })
+}
+
 // ════════════════════════════════════════════════════════════════════
 // CSS（主题 token + data-* 锚点）
 // ════════════════════════════════════════════════════════════════════
@@ -588,6 +608,137 @@ function userNodeText(node: any): string {
     .join('')
 }
 
+// ════════════════════════════════════════════════════════════════════
+// 导出：客户端快照直出（主路径，零网络/磁盘往返）
+// 注意：mdEscapeUser / safeFilenameClient 等是 src/index.ts 同名逻辑的副本
+// （bundle 纯净门禁禁止跨包值导入），修改转义规则时两处必须同步。
+// ════════════════════════════════════════════════════════════════════
+const USER_KINDS = new Set(['user', 'steering'])
+
+/** 与 Host 端 escapeUserText 保持一致的全局严格转义。 */
+function mdEscapeUser(text: string): string {
+  return text
+    .replace(/\\/g, '\\\\')
+    .replace(/[`*_\[\]#!~|]/g, '\\$&')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/^(\s*)([-+=])/gm, '$1\\$2')
+    .replace(/^(\s*\d+)([.)])/gm, '$1\\$2')
+}
+
+function pad2(n: number): string {
+  return String(n).padStart(2, '0')
+}
+
+function fmtLocal(ms: number): string {
+  const d = new Date(ms - new Date().getTimezoneOffset() * 60000)
+  return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日 ${pad2(d.getHours())}:${pad2(d.getMinutes())}`
+}
+
+function safeFilenameClient(title: string): string {
+  const cleaned = title.replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim()
+  return (cleaned || '会话') + '.md'
+}
+
+function imageLabelOf(b: any): string {
+  const att = b && b.attachment ? b.attachment : null
+  const nm = att && typeof att.name === 'string' ? att.name : ''
+  if (nm) return nm
+  const id = att && typeof att.attachmentId === 'string' ? att.attachmentId : ''
+  if (id) return id.replace(/^sha256:/, '') + '.bin'
+  return '附件'
+}
+
+function nodeBlocks(node: any): any[] {
+  const d = (node && node.data) || {}
+  if (Array.isArray(d.content)) return d.content
+  const m = d.message
+  if (m && Array.isArray(m.content)) return m.content
+  return []
+}
+
+/**
+ * 从会话对象层不可变快照直接构建导出文档。
+ * 以 user/steering 节点为轮边界；assistant* 节点文本归入当前轮。
+ * 结构防御式读取：任何缺失/变形都返回 null，由调用方回退服务端路径。
+ */
+function snapshotToMarkdown(snapshot: any, now: number): { markdown: string; filename: string } | null {
+  if (!snapshot) return null
+  const chat = snapshot.chat
+  const order = chat && Array.isArray(chat.order) ? chat.order : []
+  const nodes = chat && chat.nodes ? chat.nodes : null
+  if (!nodes || order.length === 0) return null
+  const get = (key: string): any => (typeof nodes.get === 'function' ? nodes.get(key) : nodes[key])
+
+  const rounds: Array<{ user: string[]; ai: string[] }> = []
+  let cur: { user: string[]; ai: string[] } | null = null
+  let firstRawUser: string | null = null
+  let sawAny = false
+  for (const key of order) {
+    const node = get(key)
+    if (!node) continue
+    const kind = typeof node.kind === 'string' ? node.kind : ''
+    if (USER_KINDS.has(kind)) {
+      sawAny = true
+      cur = { user: [], ai: [] }
+      rounds.push(cur)
+      for (const b of nodeBlocks(node)) {
+        if (!b) continue
+        if (b.type === 'text' && typeof b.text === 'string') {
+          if (firstRawUser === null && b.text.trim() !== '') firstRawUser = b.text
+          cur.user.push(mdEscapeUser(b.text))
+        } else if (b.type === 'image') {
+          cur.user.push(mdEscapeUser(imageLabelOf(b)))
+        }
+      }
+    } else if (/assistant/.test(kind) && cur) {
+      sawAny = true
+      for (const b of nodeBlocks(node)) {
+        if (b && b.type === 'text' && typeof b.text === 'string') cur.ai.push(b.text)
+      }
+    }
+  }
+  if (!sawAny || rounds.length === 0) return null
+
+  // 标题：快照标题 → 首条用户输入截断 → 兜底「会话」。
+  let title = typeof snapshot.title === 'string' ? snapshot.title.trim() : ''
+  if (title === '' && firstRawUser !== null) title = firstRawUser.replace(/[#>\r\n]/g, ' ').trim().slice(0, 24)
+  if (title === '') title = '会话'
+
+  const out: string[] = []
+  out.push(`# ${title}`)
+  out.push('')
+  const createdAt = snapshot.session && typeof snapshot.session.createdAt === 'number' ? snapshot.session.createdAt : null
+  if (createdAt !== null) out.push(`> **创建时间** · ${fmtLocal(createdAt)}`)
+  out.push(`> **导出时间** · ${fmtLocal(now)}`)
+  out.push(`> **对话轮数** · ${rounds.length}`)
+  out.push('')
+  rounds.forEach((r, i) => {
+    const user = r.user.filter((s) => s.trim() !== '').join('\n\n').trim()
+    const ai = r.ai.join('\n\n').trim()
+    out.push(`## 第 ${pad2(i + 1)} 轮`)
+    out.push('')
+    if (user !== '') {
+      out.push('<!-- 用户消息 -->')
+      out.push('<span style="color: #ffffff; background-color: #4a4a4a; padding: 2px 8px; border-radius: 4px; font-weight: 700;">用户</span>')
+      out.push('')
+      out.push(user)
+      out.push('')
+    }
+    if (ai !== '') {
+      out.push('<!-- AI 消息 -->')
+      out.push('<span style="color: #ffffff; background-color: #4a4a4a; padding: 2px 8px; border-radius: 4px; font-weight: 700;">AI</span>')
+      out.push('')
+      out.push(ai)
+      out.push('')
+    }
+    out.push('---')
+    out.push('')
+  })
+  return { markdown: out.join('\n').trimEnd() + '\n', filename: safeFilenameClient(title) }
+}
+
 function HistoryPanel({ useSession, onClose }: { useSession: any; onClose: () => void }) {
   const [query, setQuery] = useState('')
   const searchRef = useRef<HTMLInputElement | null>(null)
@@ -710,6 +861,37 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   )
 }
 
+/**
+ * 导出按钮：订阅会话快照，点击时优先本地直出（毫秒级），
+ * 快照缺失/构建异常时回退服务端路径。
+ */
+function ExportButton({ sessionId, useSession, busy }: { sessionId?: string; useSession: any; busy: boolean }) {
+  const snapshot = useSession((s: any) => s)
+  const onClick = (): void => {
+    if (!sessionId || busyExport) return
+    busyExport = true
+    notify()
+    try {
+      const direct = snapshotToMarkdown(snapshot, Date.now())
+      if (direct) {
+        triggerDownload(direct.markdown, direct.filename)
+        busyExport = false
+        notify()
+        return
+      }
+    } catch {
+      // 快照结构不符合预期 → 服务端兜底
+    }
+    exportViaServer(sessionId)
+  }
+  return h('button', {
+    className: 'dsh-gc-btn',
+    onClick,
+    disabled: !sessionId || busy,
+    title: '导出 Markdown',
+  }, busy ? '导出中…' : '导出')
+}
+
 function Buttons({ sessionId, useSession }: { sessionId?: string; useSession?: any }) {
   const store = useStore()
   const folded = store.foldGlobal === 'folded'
@@ -726,25 +908,6 @@ function Buttons({ sessionId, useSession }: { sessionId?: string; useSession?: a
     )
   }
 
-  const doExport = (): void => {
-    if (!sessionId || busyExport) return
-    busyExport = true
-    notify()
-    fetchJson('/export', { method: 'POST', body: JSON.stringify({ sessionId, now: Date.now(), tzOffsetMin: -new Date().getTimezoneOffset() }) })
-      .then((d) => {
-        if (d && d.ok && d.markdown) {
-          triggerDownload(d.markdown, d.filename || '会话.md')
-        } else {
-          window.alert('导出失败：' + ((d && d.error) || '未知错误'))
-        }
-      })
-      .catch((e) => { window.alert('导出失败：' + String(e)) })
-      .finally(() => {
-        busyExport = false
-        notify()
-      })
-  }
-
   const openSettings = (): void => {
     settingsOpen = true
     notify()
@@ -759,12 +922,14 @@ function Buttons({ sessionId, useSession }: { sessionId?: string; useSession?: a
         'aria-pressed': folded,
       }, folded ? '展开' : '折叠'),
       store.settings.export.showButton
-        ? h('button', {
-          className: 'dsh-gc-btn',
-          onClick: doExport,
-          disabled: !sessionId || store.busyExport,
-          title: '导出 Markdown',
-        }, store.busyExport ? '导出中…' : '导出')
+        ? (useSession
+          ? h(ExportButton, { sessionId, useSession, busy: store.busyExport })
+          : h('button', {
+            className: 'dsh-gc-btn',
+            onClick: () => exportViaServer(sessionId),
+            disabled: !sessionId || store.busyExport,
+            title: '导出 Markdown',
+          }, store.busyExport ? '导出中…' : '导出'))
         : null,
       h('button', { className: 'dsh-gc-btn', onClick: openSettings, title: '设置' }, '设置'),
     ),
