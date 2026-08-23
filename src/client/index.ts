@@ -283,6 +283,29 @@ function toggleGlobalFold(): void {
   scheduleProcessRows()
 }
 
+/**
+ * 等待滚动停稳（窗口 + 会话滚动容器连续数帧位置不变），超时兜底后回调。
+ * 用于平滑滚动结束后再测量目标行几何。
+ */
+function waitForScrollSettle(onSettle: () => void): void {
+  const container = document.querySelector<HTMLElement>('[data-conversation-scroll]')
+  const readSig = (): string => `${window.scrollY}|${container ? container.scrollTop : ''}`
+  let last = readSig()
+  let stable = 0
+  const t0 = Date.now()
+  const tick = (): void => {
+    const cur = readSig()
+    stable = cur === last ? stable + 1 : 0
+    last = cur
+    if (stable >= 6 || Date.now() - t0 > 1000) {
+      onSettle()
+      return
+    }
+    requestAnimationFrame(tick)
+  }
+  requestAnimationFrame(tick)
+}
+
 // ════════════════════════════════════════════════════════════════════
 // 顶部固定头像（视口内头像覆盖率 <25% 时显示，点击打开历史窗口）
 // ════════════════════════════════════════════════════════════════════
@@ -338,17 +361,45 @@ function positionSticky(): void {
   stickyEl.style.top = top + 'px'
 }
 
+/** 单采样点可见：在视口内且命中测试返回头像自身（未被 session log 等浮层遮挡）。 */
+function avatarPointVisible(img: HTMLElement, x: number, y: number): boolean {
+  if (x < 0 || y < 0 || x >= window.innerWidth || y >= window.innerHeight) return false
+  return document.elementFromPoint(x, y) === img
+}
+
+/**
+ * 头像可见性：中心 + 四个内对角采样点（圆形头像的几何角点在圆外，不可用），
+ * 任一采样点未遮挡即在视口内 → 可见（隐藏 sticky）；全部被遮挡/出视口 → 显示 sticky。
+ */
+function avatarVisible(img: HTMLElement): boolean {
+  const r = img.getBoundingClientRect()
+  if (r.width <= 0 || r.height <= 0) return false
+  if (r.bottom <= 0 || r.top >= window.innerHeight || r.right <= 0 || r.left >= window.innerWidth) return false
+  const cx = r.left + r.width / 2
+  const cy = r.top + r.height / 2
+  const d = Math.min(r.width, r.height) * 0.35
+  const samples: Array<[number, number]> = [
+    [cx, cy],
+    [cx - d, cy - d], [cx + d, cy - d],
+    [cx - d, cy + d], [cx + d, cy + d],
+  ]
+  for (const [x, y] of samples) {
+    if (avatarPointVisible(img, x, y)) return true
+  }
+  return false
+}
+
 function updateStickyVisibility(): void {
   if (!stickyEl) return
-  // 视口内存在任一普通头像 → 隐藏；否则显示。
-  const vh = window.innerHeight
-  const avatars = document.querySelectorAll('.dsh-gc-avatar')
-  let anyVisible = false
+  // 视口内存在任一未被遮挡的普通头像 → 隐藏；否则显示。
+  const avatars = document.querySelectorAll<HTMLElement>('.dsh-gc-avatar')
   for (let i = 0; i < avatars.length; i++) {
-    const r = (avatars[i] as HTMLElement).getBoundingClientRect()
-    if (r.bottom > 0 && r.top < vh) { anyVisible = true; break }
+    if (avatarVisible(avatars[i])) {
+      stickyEl.style.display = 'none'
+      return
+    }
   }
-  stickyEl.style.display = anyVisible ? 'none' : ''
+  stickyEl.style.display = ''
 }
 
 function clearAvatarLayer(): void {
@@ -512,12 +563,23 @@ function HistoryPanel({ useSession, onClose }: { useSession: any; onClose: () =>
 
   const jump = (key: string): void => {
     const rows = document.querySelectorAll('[data-chat-anchor-key]')
+    let row: HTMLElement | null = null
     for (let i = 0; i < rows.length; i++) {
       if (rows[i].getAttribute('data-chat-anchor-key') === key) {
-        ;(rows[i] as HTMLElement).scrollIntoView({ block: 'center', behavior: 'smooth' })
-        return
+        row = rows[i] as HTMLElement
+        break
       }
     }
+    if (!row) return
+    row.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    // 滚动停稳后把悬浮窗吸附到目标行头像旁，几何与直接点击头像完全一致。
+    waitForScrollSettle(() => {
+      const img = row!.querySelector<HTMLElement>(':scope > .dsh-gc-avatar')
+      const anchor = img ?? row!
+      const r = anchor.getBoundingClientRect()
+      lastAvatarRect = { left: r.left, top: r.top }
+      notify()
+    })
   }
 
   const PANEL_W = 300

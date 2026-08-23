@@ -187,6 +187,27 @@ function escapeTitle(t: string): string {
   return s || '会话'
 }
 
+/**
+ * 用户文本全局严格转义，阻断 Markdown 注入（原理同 SQL 注入：不可信数据不得改变文档结构）。
+ * 顺序固定：反斜杠加倍 → 反斜杠转义结构符号 → 实体化 & < >（消灭裸 HTML/HTML 注释/行首引用）
+ * → 行首 - + = 与有序列表标记转义（消灭分隔线/Setext 标题/伪列表）。
+ */
+function escapeUserText(text: string): string {
+  return text
+    .replace(/\\/g, '\\\\')
+    .replace(/[`*_\[\]#!~|]/g, '\\$&')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/^(\s*)([-+=])/gm, '$1\\$2')
+    .replace(/^(\s*\d+)([.)])/gm, '$1\\$2')
+}
+
+/** 图片引用的 <> 包裹目标：去除会破坏目的地址的字符。 */
+function safeImageDest(name: string): string {
+  return name.replace(/[<>\r\n]/g, '')
+}
+
 function buildMarkdown(events: readonly EventLike[], title: string, createdAt: number, now: number, tzOffsetMin: number): string {
   let turnCount = 0
   for (const ev of events) if (ev.type === 'turn/start') turnCount += 1
@@ -209,7 +230,7 @@ function buildMarkdown(events: readonly EventLike[], title: string, createdAt: n
     if (!inTurn) return
     turnNum += 1
     const userParts = [...userTexts]
-    if (userImages.length > 0) userParts.push(userImages.map((i) => `![${i}](${i})`).join(' '))
+    if (userImages.length > 0) userParts.push(userImages.map((i) => `![${i}](<${safeImageDest(i)}>)`).join(' '))
     const user = userParts.filter((s) => s.trim() !== '').join('\n\n').trim()
     const ai = aiTexts.join('\n\n').trim()
 
@@ -247,8 +268,8 @@ function buildMarkdown(events: readonly EventLike[], title: string, createdAt: n
         const src = data && data.source
         if (src && src.kind === 'user') {
           for (const b of (data.content ?? []) as BlockLike[]) {
-            if (b.type === 'text' && typeof b.text === 'string') userTexts.push(b.text)
-            else if (b.type === 'image') userImages.push(imageLabel(b.attachment))
+            if (b.type === 'text' && typeof b.text === 'string') userTexts.push(escapeUserText(b.text))
+            else if (b.type === 'image') userImages.push(escapeUserText(imageLabel(b.attachment)))
           }
         }
         break
