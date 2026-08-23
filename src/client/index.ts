@@ -922,7 +922,22 @@ function HistoryPanel({ useSession, onClose }: { useSession: any; onClose: () =>
   left = Math.max(8, Math.min(left, window.innerWidth - PANEL_W - 8))
   // 垂直边界：用实测面板高度钳制，保证完整可见。
   const maxTop = Math.max(8, window.innerHeight - panelH - 8)
-  const top = Math.max(8, Math.min(lastAvatarRect.top, maxTop))
+  let top = Math.max(8, Math.min(lastAvatarRect.top, maxTop))
+  // 避让顶部 sticky 头像：面板与其相交时下移到头像下方（放不下则上移到其上方），
+  // 杜绝面板压住自动生成的顶部头像。
+  const sticky = document.querySelector<HTMLElement>('.dsh-gc-sticky')
+  if (sticky && sticky.style.display !== 'none') {
+    const sr = sticky.getBoundingClientRect()
+    if (sr.width > 0 && sr.height > 0) {
+      const intersects = left < sr.right + 4 && left + PANEL_W > sr.left - 4 && top < sr.bottom + 4 && top + panelH > sr.top - 4
+      if (intersects) {
+        const below = sr.bottom + 8
+        const above = sr.top - panelH - 8
+        if (below + panelH <= window.innerHeight - 8) top = Math.max(8, below)
+        else if (above >= 8) top = above
+      }
+    }
+  }
   // 仅跳转重吸附时播放平移动画；打开瞬间瞬时定位。
   const anim = panelAnimPending ? 'left 0.26s ease, top 0.26s ease' : 'none'
 
