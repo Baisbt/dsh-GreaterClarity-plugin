@@ -9,12 +9,14 @@ import { createPortal } from 'react-dom'
 const API = '/dsh-greater-clarity'
 
 interface Settings {
+  plugin: { enabled: boolean }
   export: { showButton: boolean; mode: string; targetDir: string }
   ai: { showAvatar: boolean; avatarPath: string; avatarSize: number; historyCount: number }
 }
 
 // ── 模块级共享状态（跨渲染/会话切换存活）──
 let settings: Settings = {
+  plugin: { enabled: true },
   export: { showButton: true, mode: 'download', targetDir: '' },
   ai: { showAvatar: true, avatarPath: '', avatarSize: 32, historyCount: 10 },
 }
@@ -26,8 +28,11 @@ let historyOpen = false
 let lastAvatarRect = { left: 0, top: 0 }
 
 const listeners = new Set<() => void>()
+// 层同步钩子：由 apply 注册，使每次状态刷新都把 DOM 层对齐到 enabled 开关。
+let layerSync: (() => void) | null = null
 function notify(): void {
   listeners.forEach((fn) => fn())
+  if (layerSync) layerSync()
 }
 function useStore(): { settings: Settings; foldGlobal: 'expanded' | 'folded'; settingsOpen: boolean; busyExport: boolean; historyOpen: boolean } {
   const [, force] = useState(0)
@@ -53,11 +58,11 @@ function loadSettings(): void {
     .then((d) => {
       if (d && d.ok && d.settings) {
         settings = {
+          plugin: { ...settings.plugin, ...(d.settings.plugin ?? {}) },
           export: { ...settings.export, ...(d.settings.export ?? {}) },
           ai: { ...settings.ai, ...(d.settings.ai ?? {}) },
         }
         notify()
-        scheduleProcessRows()
       }
     })
     .catch(() => {})
@@ -65,15 +70,16 @@ function loadSettings(): void {
 
 function saveSettings(patch: Partial<Settings>): void {
   settings = {
+    plugin: { ...settings.plugin, ...(patch.plugin ?? {}) },
     export: { ...settings.export, ...(patch.export ?? {}) },
     ai: { ...settings.ai, ...(patch.ai ?? {}) },
   }
   notify()
-  scheduleProcessRows()
   fetchJson('/settings', { method: 'POST', body: JSON.stringify(patch) })
     .then((d) => {
       if (d && d.ok && d.settings) {
         settings = {
+          plugin: { ...settings.plugin, ...(d.settings.plugin ?? {}) },
           export: { ...settings.export, ...(d.settings.export ?? {}) },
           ai: { ...settings.ai, ...(d.settings.ai ?? {}) },
         }
@@ -125,6 +131,11 @@ const STYLES = `
   font-size:22px;line-height:1;cursor:pointer;padding:0 4px}
 .dsh-gc-close:hover{color:var(--dsw-alias-label-primary,#222)}
 .dsh-gc-modal-body{display:flex;flex:1;min-height:0}
+.dsh-gc-modal-foot{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 16px;
+  border-top:1px solid var(--dsw-alias-border-l1,#555)}
+.dsh-gc-danger{padding:5px 12px;border-radius:6px;border:1px solid var(--dsw-alias-danger,#e05252);
+  background:transparent;color:var(--dsw-alias-danger,#e05252);cursor:pointer;font-size:12px;white-space:nowrap}
+.dsh-gc-danger:hover{background:var(--dsw-alias-danger,#e05252);color:#fff}
 .dsh-gc-nav{width:150px;flex:none;border-right:1px solid var(--dsw-alias-border-l1,#555);padding:8px}
 .dsh-gc-nav-item{display:block;width:100%;text-align:left;padding:8px 10px;margin-bottom:4px;border:none;
   border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary,#777);font-size:13px;cursor:pointer}
@@ -173,6 +184,46 @@ const BOUNDARY_KINDS = new Set(['user', 'steering'])
 const AVATAR_ROW_SELECTOR = '[data-chat-flow-kind="user"],[data-chat-flow-kind="steering"]'
 let observer: MutationObserver | null = null
 let processTimer: number | null = null
+let scrollCleanup: (() => void) | null = null
+let layerActive = false
+
+/**
+ * DOM 层（头像/折叠/sticky）随「启用」开关动态装卸；
+ * 停用时仅保留会话头部的「启用」入口，其余资源全部释放。
+ */
+function startLayer(): void {
+  if (layerActive) return
+  layerActive = true
+  observer = new MutationObserver(() => {
+    scheduleProcessRows()
+  })
+  observer.observe(document.body, { childList: true, subtree: true })
+  const onScroll = (): void => {
+    positionSticky()
+    updateStickyVisibility()
+  }
+  const onResize = (): void => {
+    positionSticky()
+    updateStickyVisibility()
+    notify()
+  }
+  document.addEventListener('scroll', onScroll, true)
+  window.addEventListener('resize', onResize)
+  scrollCleanup = () => {
+    document.removeEventListener('scroll', onScroll, true)
+    window.removeEventListener('resize', onResize)
+  }
+  scheduleProcessRows()
+}
+
+function stopLayer(): void {
+  if (!layerActive) return
+  layerActive = false
+  if (observer) { observer.disconnect(); observer = null }
+  if (processTimer !== null) { window.clearTimeout(processTimer); processTimer = null }
+  if (scrollCleanup) { scrollCleanup(); scrollCleanup = null }
+  clearAvatarLayer()
+}
 
 function scheduleProcessRows(): void {
   if (processTimer !== null) return
@@ -426,6 +477,16 @@ function ExportPane() {
   return h('div', null,
     h('div', { className: 'dsh-gc-row' },
       h('div', null,
+        h('div', { className: 'dsh-gc-label' }, '启用 GreaterClarity'),
+        h('div', { className: 'dsh-gc-hint' }, '关闭后停用全部功能，仅保留会话头部的「启用」按钮；不影响已保存的设置'),
+      ),
+      h(Toggle, {
+        checked: s.plugin.enabled !== false,
+        onChange: (v) => saveSettings({ plugin: { enabled: v } }),
+      }),
+    ),
+    h('div', { className: 'dsh-gc-row' },
+      h('div', null,
         h('div', { className: 'dsh-gc-label' }, '显示导出按钮'),
         h('div', { className: 'dsh-gc-hint' }, '在会话头部显示「导出」按钮'),
       ),
@@ -611,6 +672,21 @@ function HistoryPanel({ useSession, onClose }: { useSession: any; onClose: () =>
 
 function SettingsModal({ onClose }: { onClose: () => void }) {
   const [tab, setTab] = useState<'export' | 'ai'>('export')
+  const doUninstall = (): void => {
+    if (!window.confirm('卸载 GreaterClarity？\n将清除全部设置与上传的头像，插件随即停用（重启后仍保持停用）。')) return
+    fetchJson('/uninstall', { method: 'POST', body: '{}' })
+      .then((d) => {
+        if (d && d.ok) {
+          settings.plugin.enabled = false
+          onClose()
+          notify()
+          window.alert('已清除本地数据并停用插件。\n如需从 profile 彻底移除，请在终端运行：\ndsh plugin --profile web remove ' + ((d && d.pkg) || '@dsh-external/dsh-greater-clarity'))
+        } else {
+          window.alert('卸载失败：' + ((d && d.error) || '未知错误'))
+        }
+      })
+      .catch((e) => window.alert('卸载失败：' + String(e)))
+  }
   return h('div', { className: 'dsh-gc-modal-backdrop', onClick: (e: any) => { if (e.target === e.currentTarget) onClose() } },
     h('div', { className: 'dsh-gc-modal' },
       h('div', { className: 'dsh-gc-modal-head' },
@@ -626,6 +702,10 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           tab === 'export' ? h(ExportPane) : h(AiPane),
         ),
       ),
+      h('div', { className: 'dsh-gc-modal-foot' },
+        h('span', { className: 'dsh-gc-hint' }, '彻底移除：dsh plugin --profile web remove @dsh-external/dsh-greater-clarity'),
+        h('button', { className: 'dsh-gc-danger', onClick: doUninstall }, '卸载插件…'),
+      ),
     ),
   )
 }
@@ -633,6 +713,18 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
 function Buttons({ sessionId, useSession }: { sessionId?: string; useSession?: any }) {
   const store = useStore()
   const folded = store.foldGlobal === 'folded'
+  const enabled = store.settings.plugin.enabled !== false
+
+  // 停用态：只保留「启用」入口，其余功能与 DOM 层全部下线。
+  if (!enabled) {
+    return h('div', { className: 'dsh-gc-btns' },
+      h('button', {
+        className: 'dsh-gc-btn',
+        onClick: () => saveSettings({ plugin: { enabled: true } }),
+        title: '重新启用 GreaterClarity',
+      }, '启用'),
+    )
+  }
 
   const doExport = (): void => {
     if (!sessionId || busyExport) return
@@ -691,7 +783,7 @@ function Buttons({ sessionId, useSession }: { sessionId?: string; useSession?: a
 export const inject = ['slots']
 
 export function apply(ctx: any): void {
-  // 1) 注入样式
+  // 1) 注入样式（停用态的「启用」入口按钮仍需要）
   ctx.effect(() => {
     const style = document.createElement('style')
     style.dataset.plugin = 'dsh-greater-clarity'
@@ -700,47 +792,26 @@ export function apply(ctx: any): void {
     return () => { style.remove() }
   })
 
-  // 2) 启动头像/折叠 DOM 层
-  ctx.effect(() => {
-    observer = new MutationObserver(() => {
+  // 2) DOM 层随「启用」开关动态装卸；插件卸载时兜底停层
+  ctx.effect(() => () => stopLayer())
+  const sync = (): void => {
+    if (settings.plugin.enabled) {
+      startLayer()
       scheduleProcessRows()
-    })
-    observer.observe(document.body, { childList: true, subtree: true })
-    scheduleProcessRows()
-    return () => {
-      if (observer) { observer.disconnect(); observer = null }
-      if (processTimer !== null) { window.clearTimeout(processTimer); processTimer = null }
-      clearAvatarLayer()
+    } else {
+      stopLayer()
     }
-  })
+  }
+  layerSync = sync
 
-  // 2b) 顶部固定头像：滚动时重算位置与显隐；窗口缩放额外刷新悬浮窗位置
-  ctx.effect(() => {
-    const onScroll = (): void => {
-      positionSticky()
-      updateStickyVisibility()
-    }
-    const onResize = (): void => {
-      positionSticky()
-      updateStickyVisibility()
-      notify()
-    }
-    document.addEventListener('scroll', onScroll, true)
-    window.addEventListener('resize', onResize)
-    return () => {
-      document.removeEventListener('scroll', onScroll, true)
-      window.removeEventListener('resize', onResize)
-      removeSticky()
-    }
-  })
-
-  // 3) 注册按钮到会话头部 utilities
+  // 3) 注册按钮到会话头部 utilities（停用时仅渲染「启用」入口）
   ctx.slots.inject('conversation.session.header.utilities', () => ctx.slots.register({
     name: 'conversation.session.header.utilities',
     id: 'dsh-greater-clarity',
     order: 100,
   }, Buttons))
 
-  // 4) 加载设置
+  // 4) 加载设置并同步层状态（默认 enabled=true 时立即激活，响应到达后按实际状态校正）
   loadSettings()
+  sync()
 }

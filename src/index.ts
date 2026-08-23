@@ -4,9 +4,14 @@
  * 路由（全部挂 ctx.effect，卸载即净）：
  *   GET  /dsh-greater-clarity/avatar          → 头像图片字节
  *   GET  /dsh-greater-clarity/settings        → 读设置
- *   POST /dsh-greater-clarity/settings        → 写设置（部分 patch）
+ *   POST /dsh-GreaterClarity/settings         → 写设置（部分 patch）
  *   POST /dsh-greater-clarity/avatar-upload   → 上传头像（dataUrl base64 落盘）
  *   POST /dsh-greater-clarity/export          → { sessionId } → { ok, markdown, filename }
+ *   POST /dsh-greater-clarity/uninstall       → 清除数据目录 + 写入停用标记（软卸载）
+ *
+ * 软卸载语义：uninstalled.flag 存在时插件对外表现为停用且数据已清空，
+ * 重启后仍保持停用；在设置中重新「启用」即删除标记恢复。
+ * 从 profile 彻底移除仍需官方命令：dsh plugin --profile <name> remove <pkg>。
  *
  * 设置持久化在 $DSH_HOME/greater-clarity/settings.json（自建文件，
  * 不依赖 DSH settings provider 是否挂载，与 whale-widget/super-injector 先例一致）。
@@ -22,6 +27,7 @@ const DSH_HOME = process.env.DSH_HOME || join(homedir(), '.dsh')
 const GC_DIR = join(DSH_HOME, 'greater-clarity')
 const GC_DIR_ABS = resolve(GC_DIR)
 const SETTINGS_FILE = join(GC_DIR, 'settings.json')
+const UNINSTALLED_FLAG = join(GC_DIR, 'uninstalled.flag')
 const DEFAULT_AVATAR = join(PACKAGE_ROOT, 'assets', 'DSH_Avatar.png')
 
 const AVATAR_MIN = 16
@@ -42,12 +48,17 @@ interface AiSettings {
   avatarSize: number
   historyCount: number
 }
+interface PluginSettings {
+  enabled: boolean
+}
 interface Settings {
+  plugin: PluginSettings
   export: ExportSettings
   ai: AiSettings
 }
 
 const DEFAULT_SETTINGS: Settings = {
+  plugin: { enabled: true },
   export: { showButton: true, mode: 'download', targetDir: '' },
   ai: { showAvatar: true, avatarPath: '', avatarSize: 32, historyCount: 10 },
 }
@@ -124,9 +135,11 @@ function respondError(res: any, err: unknown): void {
 function readSettings(): Settings {
   try {
     const raw = JSON.parse(readFileSync(SETTINGS_FILE, 'utf8'))
+    const plg = raw && typeof raw.plugin === 'object' ? raw.plugin : {}
     const exp = raw && typeof raw.export === 'object' ? raw.export : {}
     const ai = raw && typeof raw.ai === 'object' ? raw.ai : {}
     return {
+      plugin: { ...DEFAULT_SETTINGS.plugin, ...plg },
       export: { ...DEFAULT_SETTINGS.export, ...exp },
       ai: { ...DEFAULT_SETTINGS.ai, ...ai },
     }
@@ -139,6 +152,18 @@ function readSettings(): Settings {
     }
     return DEFAULT_SETTINGS
   }
+}
+
+/** 软卸载标记存在 → 对外一律视为停用（跨重启持久）。 */
+function softUninstalled(): boolean {
+  return existsSync(UNINSTALLED_FLAG)
+}
+
+/** 对外呈现的生效设置：软卸载期间强制 enabled=false。 */
+function effectiveSettings(): Settings {
+  const s = readSettings()
+  if (softUninstalled()) s.plugin.enabled = false
+  return s
 }
 
 function writeSettings(s: Settings): void {
@@ -386,9 +411,13 @@ export function apply(ctx: AppContext): void {
           const patch = JSON.parse((await readBody(req)) || '{}')
           const cur = readSettings()
           // 逐字段类型净化：非法类型不落盘，可调数值统一 clamp。
+          const plgIn = patch && typeof patch.plugin === 'object' ? patch.plugin : {}
           const expIn = patch && typeof patch.export === 'object' ? patch.export : {}
           const aiIn = patch && typeof patch.ai === 'object' ? patch.ai : {}
           const next: Settings = {
+            plugin: {
+              enabled: typeof plgIn.enabled === 'boolean' ? plgIn.enabled : cur.plugin.enabled,
+            },
             export: {
               showButton: typeof expIn.showButton === 'boolean' ? expIn.showButton : cur.export.showButton,
               mode: typeof expIn.mode === 'string' ? expIn.mode : cur.export.mode,
@@ -402,11 +431,13 @@ export function apply(ctx: AppContext): void {
             },
           }
           writeSettings(next)
+          // 重新启用即解除软卸载标记。
+          if (next.plugin.enabled && softUninstalled()) rmSync(UNINSTALLED_FLAG, { force: true })
           res.writeHead(200, JSON_HEADERS)
           res.end(JSON.stringify({ ok: true, settings: next }))
         } else {
           res.writeHead(200, JSON_HEADERS)
-          res.end(JSON.stringify({ ok: true, settings: readSettings() }))
+          res.end(JSON.stringify({ ok: true, settings: effectiveSettings() }))
         }
       } catch (err) {
         respondError(res, err)
@@ -463,6 +494,26 @@ export function apply(ctx: AppContext): void {
         const markdown = buildMarkdown(snapshot.events, title, snapshot.session.createdAt, now, tzOffsetMin)
         res.writeHead(200, JSON_HEADERS)
         res.end(JSON.stringify({ ok: true, markdown, filename: safeFilename(title) }))
+      } catch (err) {
+        respondError(res, err)
+      }
+    },
+  }))
+
+  // ── 卸载（软）：清除数据目录 + 写停用标记，跨重启保持停用；彻底移除需官方 remove 命令 ──
+  disposers.push(ctx.webServer.register({
+    kind: 'exact',
+    path: '/dsh-greater-clarity/uninstall',
+    handler: async (req: any, res: any) => {
+      if (!trustedRequest(req)) return rejectUntrusted(res)
+      try {
+        if (req.method !== 'POST') throw new Error('method not allowed')
+        await readBody(req)
+        rmSync(GC_DIR, { recursive: true, force: true })
+        mkdirSync(GC_DIR, { recursive: true })
+        writeFileSync(UNINSTALLED_FLAG, JSON.stringify({ uninstalledAt: Date.now() }) + '\n', 'utf8')
+        res.writeHead(200, JSON_HEADERS)
+        res.end(JSON.stringify({ ok: true, pkg: name }))
       } catch (err) {
         respondError(res, err)
       }
