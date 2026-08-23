@@ -345,9 +345,11 @@ function buildMarkdown(events: readonly EventLike[], title: string, createdAt: n
         flush()
         break
       case 'user/message': {
-        // 轮次语义：turn 边界定轮；user 开启输入，steering（中途引导）并入当前轮的用户区。
+        // 轮次语义（A）：每条用户输入独立成轮——含运行期插入的 steering，与
+        // 历史窗口序号、头像轮次标签三处编号保持一致。
         const src = data && data.source
         if (src && (src.kind === 'user' || src.kind === 'steering')) {
+          flush()
           for (const b of (data.content ?? []) as BlockLike[]) {
             if (b.type === 'text' && typeof b.text === 'string') userTexts.push(escapeUserText(b.text))
             else if (b.type === 'image') userImages.push(escapeUserText(imageLabel(b.attachment)))

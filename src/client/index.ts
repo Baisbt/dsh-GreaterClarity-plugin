@@ -27,7 +27,13 @@ let settingsOpen = false
 let busyExport = false
 let avatarVersion = 0
 let historyOpen = false
-let lastAvatarRect = { left: 0, top: 0 }
+// 锚点几何（含右边界）：面板左侧放不下时可翻转 到锚点右侧 展开。
+let lastAvatarRect = { left: 0, top: 0, right: 0 }
+// 快速定位跳转的辅助状态。
+let jumpGen = 0 // 跳转代际：新跳转让旧的停稳回调作废，杜绝连点错乱
+let panelAnimPending = false // 仅跳转重吸附时启用一次平滑过渡；打开瞬间不播动画
+let panelH = 320 // 实测面板高度缓存（渲染后测量，参与垂直边界钳制）
+const JUMP_TOP_PAD = 12 // 跳转后行首距滚动容器顶部的留白
 
 const listeners = new Set<() => void>()
 // 层同步钩子：由 apply 注册，使每次状态刷新都把 DOM 层对齐到 enabled 开关。
@@ -163,9 +169,9 @@ const STYLES = `
 .dsh-gc-modal-body{display:flex;flex:1;min-height:0}
 .dsh-gc-modal-foot{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 16px;
   border-top:1px solid var(--dsw-alias-border-l1,#555)}
-.dsh-gc-danger{padding:5px 12px;border-radius:6px;border:1px solid var(--dsw-alias-danger,#e05252);
-  background:transparent;color:var(--dsw-alias-danger,#e05252);cursor:pointer;font-size:12px;white-space:nowrap}
-.dsh-gc-danger:hover{background:var(--dsw-alias-danger,#e05252);color:#fff}
+.dsh-gc-danger{padding:5px 12px;border-radius:6px;border:1px solid var(--dsw-alias-state-error-primary,#e05252);
+  background:transparent;color:var(--dsw-alias-state-error-primary,#e05252);cursor:pointer;font-size:12px;white-space:nowrap}
+.dsh-gc-danger:hover{background:var(--dsw-alias-state-error-primary,#e05252);color:#fff}
 .dsh-gc-nav{width:150px;flex:none;border-right:1px solid var(--dsw-alias-border-l1,#555);padding:8px}
 .dsh-gc-nav-item{display:block;width:100%;text-align:left;padding:8px 10px;margin-bottom:4px;border:none;
   border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary,#777);font-size:13px;cursor:pointer}
@@ -203,7 +209,7 @@ const STYLES = `
   color:var(--dsw-alias-brand-primary,#4a9eff)}
 .dsh-gc-top-btn:hover{border-color:var(--dsw-alias-brand-primary,#4a9eff)}
 .dsh-gc-hist-no{display:inline-block;min-width:24px;margin-right:6px;padding:1px 5px;border-radius:6px;text-align:center;
-  background:var(--dsw-alias-brand-primary,#4a9eff);color:#fff;font-weight:600}
+  background:var(--dsw-alias-button-info-fill,#4a9eff);color:#fff;font-weight:600}
 .dsh-gc-history-search{flex:none;margin:8px 8px 4px;padding:6px 10px;border-radius:6px;
   background:var(--dsw-alias-bg-layer-1,#1e1e1e);color:var(--dsw-alias-label-primary,#ddd);
   border:1px solid var(--dsw-alias-border-l1,#555);font-size:12px}
@@ -374,7 +380,7 @@ function applyFold(): void {
 }
 
 function openHistory(rect: DOMRect): void {
-  lastAvatarRect = { left: rect.left, top: rect.top }
+  lastAvatarRect = { left: rect.left, top: rect.top, right: rect.right }
   historyOpen = true
   notify()
 }
@@ -390,17 +396,29 @@ function toggleGlobalFold(): void {
 /**
  * 等待滚动停稳：捕获阶段监听全文档 scroll，静默 150ms 视为停稳，1200ms 兜底超时。
  * 相比轮询固定容器，可覆盖任何实际发生滚动的祖先容器。
+ * 快速连续触发时，新等待会取消尚未完成的旧等待——只认最后一次。
  */
+let cancelActiveSettle: (() => void) | null = null
+
 function waitForScrollSettle(onSettle: () => void): void {
+  if (cancelActiveSettle) cancelActiveSettle()
   let done = false
   let quietTimer: number | null = null
   let hardTimer: number
+  const cancelThis = (): void => {
+    if (done) return
+    done = true
+    if (quietTimer !== null) window.clearTimeout(quietTimer)
+    window.clearTimeout(hardTimer)
+    document.removeEventListener('scroll', onScroll, true)
+  }
   const finish = (): void => {
     if (done) return
     done = true
     if (quietTimer !== null) window.clearTimeout(quietTimer)
     window.clearTimeout(hardTimer)
     document.removeEventListener('scroll', onScroll, true)
+    if (cancelActiveSettle === cancelThis) cancelActiveSettle = null
     onSettle()
   }
   const onScroll = (): void => {
@@ -409,6 +427,7 @@ function waitForScrollSettle(onSettle: () => void): void {
   }
   hardTimer = window.setTimeout(finish, 1200)
   document.addEventListener('scroll', onScroll, true)
+  cancelActiveSettle = cancelThis
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -689,9 +708,12 @@ function nodeBlocks(node: any): any[] {
   return []
 }
 
-// ── 轮次映射：user 节点开启新轮，steering 归属当前轮（B 语义）──
+// ── 轮次映射：每条用户输入（user/steering）独立递增（A 语义）──
+// 依据 DSH 源码事实：仅开启新轮的输入是 kind==='user'，运行期插入的追问一律是
+// 'steering'——harness 场景下占多数，若仅对 user 计数会导致几乎全部同号。
 // 由 ExportButton / HistoryPanel 在持有最新快照时刷新；DOM 层（头像标签）据此取号。
 const roundByNodeKey = new Map<string, number>()
+const USER_KINDS = new Set(['user', 'steering'])
 
 function rebuildRoundMap(snapshot: any): void {
   roundByNodeKey.clear()
@@ -706,12 +728,9 @@ function rebuildRoundMap(snapshot: any): void {
     const node = get(key)
     if (!node) continue
     const kind = typeof node.kind === 'string' ? node.kind : ''
-    if (kind === 'user') {
+    if (kind === 'user' || kind === 'steering') {
       cur += 1
       roundByNodeKey.set(key, cur)
-    } else if (kind === 'steering') {
-      // 会话开头的孤儿 steering 记为第 1 轮。
-      roundByNodeKey.set(key, Math.max(1, cur))
     }
   }
 }
@@ -744,28 +763,19 @@ function snapshotToMarkdown(snapshot: any, now: number): { markdown: string; fil
     const node = get(key)
     if (!node) continue
     const kind = typeof node.kind === 'string' ? node.kind : ''
-    const isUser = kind === 'user'
-    const isSteering = kind === 'steering'
-    if (!isUser && !isSteering && !/assistant/.test(kind)) continue
+    if (!USER_KINDS.has(kind) && !/assistant/.test(kind)) continue
     sawAny = true
-    if (isUser) {
-      // user 开启新轮。
+    if (USER_KINDS.has(kind)) {
+      // 每条用户输入独立成轮（A 语义，与轮次映射一致）。
       cur = { user: [], ai: [] }
       rounds.push(cur)
-    } else if (isSteering && !cur) {
-      // 会话开头的孤儿 steering：并入隐式首轮。
-      cur = { user: [], ai: [] }
-      rounds.push(cur)
-    }
-    if (!/assistant/.test(kind)) {
-      const bucket = cur!
       for (const b of nodeBlocks(node)) {
         if (!b) continue
         if (b.type === 'text' && typeof b.text === 'string') {
           if (firstRawUser === null && b.text.trim() !== '') firstRawUser = b.text
-          bucket.user.push(mdEscapeUser(b.text))
+          cur.user.push(mdEscapeUser(b.text))
         } else if (b.type === 'image') {
-          bucket.user.push(mdEscapeUser(imageLabelOf(b)))
+          cur.user.push(mdEscapeUser(imageLabelOf(b)))
         }
       }
     } else if (cur) {
@@ -817,6 +827,7 @@ function snapshotToMarkdown(snapshot: any, now: number): { markdown: string; fil
 function HistoryPanel({ useSession, onClose }: { useSession: any; onClose: () => void }) {
   const [query, setQuery] = useState('')
   const searchRef = useRef<HTMLInputElement | null>(null)
+  const panelRef = useRef<HTMLDivElement | null>(null)
   const snapshot = useSession((s: any) => s)
   const items = useMemo(() => {
     const list: { key: string; text: string; round: number }[] = []
@@ -862,20 +873,66 @@ function HistoryPanel({ useSession, onClose }: { useSession: any; onClose: () =>
       }
     }
     if (!row) return
-    row.scrollIntoView({ block: 'center', behavior: 'smooth' })
-    // 滚动停稳后把悬浮窗吸附到目标行头像旁，几何与直接点击头像完全一致。
+    const gen = ++jumpGen
+    // 定位到输入第一行：行顶对齐滚动容器顶部下方少许，长输入不再垂直居中。
+    const container = document.querySelector<HTMLElement>('[data-conversation-scroll]')
+    if (container) {
+      const cTop = container.getBoundingClientRect().top
+      const rTop = row.getBoundingClientRect().top
+      container.scrollTo({ top: container.scrollTop + (rTop - cTop) - JUMP_TOP_PAD, behavior: 'smooth' })
+    } else {
+      row.scrollIntoView({ block: 'start', behavior: 'smooth' })
+    }
+    // 停稳后重吸附：头像在视口内 → 与直接点击同几何；不在（长输入底部头像滚出屏）→ 锚定行首左侧。
     waitForScrollSettle(() => {
+      if (gen !== jumpGen) return
+      let anchorLeft = 0
+      let anchorTop = 0
+      let anchorRight = 0
       const img = row!.querySelector<HTMLElement>(':scope > .dsh-gc-avatarwrap .dsh-gc-avatar')
-      const anchor = img ?? row!
-      const r = anchor.getBoundingClientRect()
-      lastAvatarRect = { left: r.left, top: r.top }
+      if (img) {
+        const r = img.getBoundingClientRect()
+        if (r.width > 0 && r.top >= 8 && r.bottom <= window.innerHeight - 8) {
+          anchorLeft = r.left
+          anchorTop = r.top
+          anchorRight = r.right
+        }
+      }
+      if (anchorLeft === 0 && anchorTop === 0) {
+        // 行首锚点视为零宽点：right 取左缘，翻转展开由边界钳制兜底。
+        const rr = row!.getBoundingClientRect()
+        anchorLeft = rr.left
+        anchorTop = rr.top
+        anchorRight = rr.left
+      }
+      panelAnimPending = true
+      lastAvatarRect = { left: anchorLeft, top: anchorTop, right: anchorRight }
       notify()
     })
   }
 
   const PANEL_W = 300
-  const left = Math.max(8, Math.min(lastAvatarRect.left - PANEL_W - 8, window.innerWidth - PANEL_W - 8))
-  const top = Math.max(8, Math.min(lastAvatarRect.top, window.innerHeight - 200))
+  // 左侧展开优先（与直接点击头像的几何一致）；空间不足（如顶部 sticky 头像贴着屏幕左缘）
+  // 时翻转到锚点右侧 8px 处展开，消除吸附后的水平偏移与遮挡。
+  let left = lastAvatarRect.left - PANEL_W - 8
+  if (left < 8) {
+    const anchorRight = lastAvatarRect.right > lastAvatarRect.left ? lastAvatarRect.right : lastAvatarRect.left + 24
+    left = anchorRight + 8
+  }
+  left = Math.max(8, Math.min(left, window.innerWidth - PANEL_W - 8))
+  // 垂直边界：用实测面板高度钳制，保证完整可见。
+  const maxTop = Math.max(8, window.innerHeight - panelH - 8)
+  const top = Math.max(8, Math.min(lastAvatarRect.top, maxTop))
+  // 仅跳转重吸附时播放平移动画；打开瞬间瞬时定位。
+  const anim = panelAnimPending ? 'left 0.26s ease, top 0.26s ease' : 'none'
+
+  useEffect(() => {
+    const el = panelRef.current
+    if (el && el.offsetHeight > 100) panelH = el.offsetHeight
+    if (!panelAnimPending) return
+    const t = window.setTimeout(() => { panelAnimPending = false }, 320)
+    return () => window.clearTimeout(t)
+  })
 
   // 回到顶部：滚动容器置顶（全量历史已加载时即最早消息）；容器缺失回退首行定位。
   const scrollToTop = (): void => {
@@ -888,7 +945,7 @@ function HistoryPanel({ useSession, onClose }: { useSession: any; onClose: () =>
     if (first) first.scrollIntoView({ block: 'start', behavior: 'smooth' })
   }
 
-  return h('div', { className: 'dsh-gc-history', style: { left: left + 'px', top: top + 'px' } },
+  return h('div', { ref: panelRef, className: 'dsh-gc-history', style: { left: left + 'px', top: top + 'px', transition: anim } },
     h('div', { className: 'dsh-gc-history-topbar' },
       h('button', { className: 'dsh-gc-top-btn', onClick: scrollToTop, title: '定位到会话最顶部' }, '回到顶部'),
     ),
