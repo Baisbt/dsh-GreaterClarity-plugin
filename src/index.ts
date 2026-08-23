@@ -51,14 +51,24 @@ interface AiSettings {
 interface PluginSettings {
   enabled: boolean
 }
+interface FlowSettings {
+  /** 进入会话时自动逐页加载更早历史，直到拉全（或达到 maxPages 上限）。 */
+  autoLoadHistory: boolean
+  /** 单会话最大加载页数（每页约 50 条）；0 = 不限制。 */
+  maxPages: number
+}
 interface Settings {
   plugin: PluginSettings
+  flow: FlowSettings
   export: ExportSettings
   ai: AiSettings
 }
 
+const HISTORY_PAGES_MAX = 500
+
 const DEFAULT_SETTINGS: Settings = {
   plugin: { enabled: true },
+  flow: { autoLoadHistory: true, maxPages: 0 },
   export: { showButton: true, mode: 'download', targetDir: '' },
   ai: { showAvatar: true, avatarPath: '', avatarSize: 32, historyCount: 10 },
 }
@@ -136,10 +146,12 @@ function readSettings(): Settings {
   try {
     const raw = JSON.parse(readFileSync(SETTINGS_FILE, 'utf8'))
     const plg = raw && typeof raw.plugin === 'object' ? raw.plugin : {}
+    const flow = raw && typeof raw.flow === 'object' ? raw.flow : {}
     const exp = raw && typeof raw.export === 'object' ? raw.export : {}
     const ai = raw && typeof raw.ai === 'object' ? raw.ai : {}
     return {
       plugin: { ...DEFAULT_SETTINGS.plugin, ...plg },
+      flow: { ...DEFAULT_SETTINGS.flow, ...flow },
       export: { ...DEFAULT_SETTINGS.export, ...exp },
       ai: { ...DEFAULT_SETTINGS.ai, ...ai },
     }
@@ -181,6 +193,13 @@ function clampHistoryCount(n: unknown): number {
   const num = typeof n === 'number' ? n : Number(n)
   if (!Number.isFinite(num)) return DEFAULT_SETTINGS.ai.historyCount
   return Math.min(HISTORY_COUNT_MAX, Math.max(HISTORY_COUNT_MIN, Math.round(num)))
+}
+
+/** 加载页数上限：0 = 不限制，其余钳制到 1..HISTORY_PAGES_MAX。 */
+function clampMaxPages(n: unknown): number {
+  const num = typeof n === 'number' ? n : Number(n)
+  if (!Number.isFinite(num)) return DEFAULT_SETTINGS.flow.maxPages
+  return Math.min(HISTORY_PAGES_MAX, Math.max(0, Math.round(num)))
 }
 
 function resolveAvatarPath(s: Settings): string {
@@ -412,11 +431,16 @@ export function apply(ctx: AppContext): void {
           const cur = readSettings()
           // 逐字段类型净化：非法类型不落盘，可调数值统一 clamp。
           const plgIn = patch && typeof patch.plugin === 'object' ? patch.plugin : {}
+          const flowIn = patch && typeof patch.flow === 'object' ? patch.flow : {}
           const expIn = patch && typeof patch.export === 'object' ? patch.export : {}
           const aiIn = patch && typeof patch.ai === 'object' ? patch.ai : {}
           const next: Settings = {
             plugin: {
               enabled: typeof plgIn.enabled === 'boolean' ? plgIn.enabled : cur.plugin.enabled,
+            },
+            flow: {
+              autoLoadHistory: typeof flowIn.autoLoadHistory === 'boolean' ? flowIn.autoLoadHistory : cur.flow.autoLoadHistory,
+              maxPages: 'maxPages' in flowIn ? clampMaxPages(flowIn.maxPages) : cur.flow.maxPages,
             },
             export: {
               showButton: typeof expIn.showButton === 'boolean' ? expIn.showButton : cur.export.showButton,
