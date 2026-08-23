@@ -1,0 +1,7 @@
+# dsh-greater-clarity bundle 层：插入引导插件行。
+# 安装方式：dsh plugin --profile web add <本目录> （官方装配）
+# 或本地开发：dev_inject_plugin（运行时注入，见 README）。
+- insert:
+    - id: dsh-greater-clarity
+      name: '@dsh-external/dsh-greater-clarity'
+      config: {}
