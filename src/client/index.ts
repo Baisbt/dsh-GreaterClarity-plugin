@@ -10,6 +10,7 @@ const API = '/dsh-greater-clarity'
 
 interface Settings {
   plugin: { enabled: boolean }
+  ui: { foldGlobal: 'expanded' | 'folded' }
   export: { showButton: boolean; mode: string; targetDir: string }
   ai: { showAvatar: boolean; avatarPath: string; avatarSize: number; historyCount: number }
 }
@@ -17,6 +18,7 @@ interface Settings {
 // ── 模块级共享状态（跨渲染/会话切换存活）──
 let settings: Settings = {
   plugin: { enabled: true },
+  ui: { foldGlobal: 'expanded' },
   export: { showButton: true, mode: 'download', targetDir: '' },
   ai: { showAvatar: true, avatarPath: '', avatarSize: 32, historyCount: 10 },
 }
@@ -59,9 +61,12 @@ function loadSettings(): void {
       if (d && d.ok && d.settings) {
         settings = {
           plugin: { ...settings.plugin, ...(d.settings.plugin ?? {}) },
+          ui: { ...settings.ui, ...(d.settings.ui ?? {}) },
           export: { ...settings.export, ...(d.settings.export ?? {}) },
           ai: { ...settings.ai, ...(d.settings.ai ?? {}) },
         }
+        // 还原持久化的全局折叠状态（跨页面/服务重启）。
+        foldGlobal = settings.ui.foldGlobal === 'folded' ? 'folded' : 'expanded'
         notify()
       }
     })
@@ -71,6 +76,7 @@ function loadSettings(): void {
 function saveSettings(patch: Partial<Settings>): void {
   settings = {
     plugin: { ...settings.plugin, ...(patch.plugin ?? {}) },
+    ui: { ...settings.ui, ...(patch.ui ?? {}) },
     export: { ...settings.export, ...(patch.export ?? {}) },
     ai: { ...settings.ai, ...(patch.ai ?? {}) },
   }
@@ -80,6 +86,7 @@ function saveSettings(patch: Partial<Settings>): void {
       if (d && d.ok && d.settings) {
         settings = {
           plugin: { ...settings.plugin, ...(d.settings.plugin ?? {}) },
+          ui: { ...settings.ui, ...(d.settings.ui ?? {}) },
           export: { ...settings.export, ...(d.settings.export ?? {}) },
           ai: { ...settings.ai, ...(d.settings.ai ?? {}) },
         }
@@ -131,10 +138,13 @@ const STYLES = `
 .dsh-gc-btn[aria-pressed="true"]{background:var(--dsw-alias-brand-primary,#4a9eff);color:var(--dsw-alias-label-primary-foreground,#fff);border-color:transparent}
 .dsh-gc-btn:disabled{opacity:.45;cursor:not-allowed}
 [data-chat-flow-kind="user"],[data-chat-flow-kind="steering"]{position:relative}
-.dsh-gc-avatar{position:absolute;top:100%;right:calc(100% + 8px);border-radius:50%;object-fit:cover;cursor:pointer;
-  border:1px solid var(--dsw-alias-border-l1,#555);box-shadow:0 1px 3px rgba(0,0,0,.2);z-index:1}
+.dsh-gc-avatarwrap{position:absolute;top:100%;right:calc(100% + 8px);display:flex;flex-direction:column;align-items:center;gap:2px;z-index:1}
+.dsh-gc-avatar{display:block;border-radius:50%;object-fit:cover;cursor:pointer;
+  border:1px solid var(--dsw-alias-border-l1,#555);box-shadow:0 1px 3px rgba(0,0,0,.2)}
+.dsh-gc-round{font-size:10px;line-height:1.3;padding:1px 6px;border-radius:8px;white-space:nowrap;cursor:default;user-select:none;
+  background:var(--dsw-alias-bg-layer-1,#1e1e1e);color:var(--dsw-alias-label-secondary,#bbb);border:1px solid var(--dsw-alias-border-l1,#555)}
 @container (max-width:900px){
-  .dsh-gc-avatar{position:static;float:left;margin:2px 8px 4px 0}
+  .dsh-gc-avatarwrap{position:static;float:left;margin:2px 8px 4px 0}
 }
 .dsh-gc-sticky{position:fixed;top:8px;z-index:90;border-radius:50%;object-fit:cover;cursor:pointer;
   border:1px solid var(--dsw-alias-border-l1,#555);box-shadow:0 2px 8px rgba(0,0,0,.3)}
@@ -187,6 +197,13 @@ const STYLES = `
   display:flex;flex-direction:column;background:var(--dsw-alias-bg-overlay,#fff);
   border:1px solid var(--dsw-alias-border-l2,#333);border-radius:10px;
   box-shadow:0 8px 28px rgba(0,0,0,.3);overflow:hidden;color:var(--dsw-alias-label-primary,#222);font-size:12px}
+.dsh-gc-history-topbar{flex:none;padding:8px 8px 0}
+.dsh-gc-top-btn{display:block;width:100%;padding:6px;border-radius:6px;font-size:12px;cursor:pointer;
+  border:1px solid var(--dsw-alias-border-l1,#555);background:var(--dsw-alias-bg-layer-1,#1e1e1e);
+  color:var(--dsw-alias-brand-primary,#4a9eff)}
+.dsh-gc-top-btn:hover{border-color:var(--dsw-alias-brand-primary,#4a9eff)}
+.dsh-gc-hist-no{display:inline-block;min-width:24px;margin-right:6px;padding:1px 5px;border-radius:6px;text-align:center;
+  background:var(--dsw-alias-brand-primary,#4a9eff);color:#fff;font-weight:600}
 .dsh-gc-history-search{flex:none;margin:8px 8px 4px;padding:6px 10px;border-radius:6px;
   background:var(--dsw-alias-bg-layer-1,#1e1e1e);color:var(--dsw-alias-label-primary,#ddd);
   border:1px solid var(--dsw-alias-border-l1,#555);font-size:12px}
@@ -271,15 +288,17 @@ function processRows(): void {
 function ensureAvatars(): void {
   const userRows = document.querySelectorAll<HTMLElement>(AVATAR_ROW_SELECTOR)
   if (!settings.ai.showAvatar) {
-    document.querySelectorAll('.dsh-gc-avatar').forEach((el) => el.remove())
+    document.querySelectorAll('.dsh-gc-avatarwrap').forEach((el) => el.remove())
     return
   }
   const size = clampAvatarSize(settings.ai.avatarSize)
   for (let i = 0; i < userRows.length; i++) {
     const row = userRows[i]
-    let img = row.querySelector<HTMLElement>(':scope > .dsh-gc-avatar')
-    if (!img) {
-      img = document.createElement('img')
+    let wrap = row.querySelector<HTMLElement>(':scope > .dsh-gc-avatarwrap')
+    if (!wrap) {
+      wrap = document.createElement('div')
+      wrap.className = 'dsh-gc-avatarwrap'
+      const img = document.createElement('img')
       img.className = 'dsh-gc-avatar'
       img.alt = 'AI 头像'
       img.draggable = false
@@ -288,14 +307,25 @@ function ensureAvatars(): void {
         const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
         openHistory(rect)
       })
-      row.insertBefore(img, row.firstChild)
+      const label = document.createElement('div')
+      label.className = 'dsh-gc-round'
+      wrap.appendChild(img)
+      wrap.appendChild(label)
+      row.insertBefore(wrap, row.firstChild)
     }
+    const img = wrap.querySelector<HTMLElement>('.dsh-gc-avatar')
+    const label = wrap.querySelector<HTMLElement>('.dsh-gc-round')
+    if (!img || !label) continue
     img.style.width = size + 'px'
     img.style.height = size + 'px'
     img.src = `${API}/avatar?v=${avatarVersion}`
+    // 轮次标签：随映射刷新保持正确；无号（映射未就绪）时隐藏。
+    const text = roundLabelForRow(row)
+    label.textContent = text
+    label.style.display = text === '' ? 'none' : ''
   }
-  // 清理挂在非用户侧行上的残留头像
-  document.querySelectorAll('.dsh-gc-avatar').forEach((el) => {
+  // 清理挂在非用户侧行上的残留包装层
+  document.querySelectorAll('.dsh-gc-avatarwrap').forEach((el) => {
     const p = el.parentElement
     if (!p || !BOUNDARY_KINDS.has(p.getAttribute('data-chat-flow-kind') || '')) el.remove()
   })
@@ -351,6 +381,8 @@ function openHistory(rect: DOMRect): void {
 
 function toggleGlobalFold(): void {
   foldGlobal = foldGlobal === 'folded' ? 'expanded' : 'folded'
+  // 持久化全局折叠状态（跨页面/服务重启还原）。
+  saveSettings({ ui: { foldGlobal: foldGlobal } })
   notify()
   scheduleProcessRows()
 }
@@ -476,7 +508,7 @@ function updateStickyVisibility(): void {
 }
 
 function clearAvatarLayer(): void {
-  document.querySelectorAll('.dsh-gc-avatar').forEach((el) => el.remove())
+  document.querySelectorAll('.dsh-gc-avatarwrap').forEach((el) => el.remove())
   document.querySelectorAll('[data-dsh-gc-hidden]').forEach((el) => el.removeAttribute('data-dsh-gc-hidden'))
   document.querySelectorAll('[data-dsh-gc-folded]').forEach((el) => el.removeAttribute('data-dsh-gc-folded'))
   removeSticky()
@@ -613,7 +645,6 @@ function userNodeText(node: any): string {
 // 注意：mdEscapeUser / safeFilenameClient 等是 src/index.ts 同名逻辑的副本
 // （bundle 纯净门禁禁止跨包值导入），修改转义规则时两处必须同步。
 // ════════════════════════════════════════════════════════════════════
-const USER_KINDS = new Set(['user', 'steering'])
 
 /** 与 Host 端 escapeUserText 保持一致的全局严格转义。 */
 function mdEscapeUser(text: string): string {
@@ -658,6 +689,40 @@ function nodeBlocks(node: any): any[] {
   return []
 }
 
+// ── 轮次映射：user 节点开启新轮，steering 归属当前轮（B 语义）──
+// 由 ExportButton / HistoryPanel 在持有最新快照时刷新；DOM 层（头像标签）据此取号。
+const roundByNodeKey = new Map<string, number>()
+
+function rebuildRoundMap(snapshot: any): void {
+  roundByNodeKey.clear()
+  if (!snapshot) return
+  const chat = snapshot.chat
+  const order = chat && Array.isArray(chat.order) ? chat.order : []
+  const nodes = chat && chat.nodes ? chat.nodes : null
+  if (!nodes || order.length === 0) return
+  const get = (key: string): any => (typeof nodes.get === 'function' ? nodes.get(key) : nodes[key])
+  let cur = 0
+  for (const key of order) {
+    const node = get(key)
+    if (!node) continue
+    const kind = typeof node.kind === 'string' ? node.kind : ''
+    if (kind === 'user') {
+      cur += 1
+      roundByNodeKey.set(key, cur)
+    } else if (kind === 'steering') {
+      // 会话开头的孤儿 steering 记为第 1 轮。
+      roundByNodeKey.set(key, Math.max(1, cur))
+    }
+  }
+}
+
+/** 头像下轮次标签文案：按行锚点 key 查映射，未知返回空串（不渲染标签）。 */
+function roundLabelForRow(row: HTMLElement | null): string {
+  const key = row?.getAttribute('data-chat-anchor-key') || ''
+  const n = key !== '' ? roundByNodeKey.get(key) : undefined
+  return n ? `第${n}轮` : ''
+}
+
 /**
  * 从会话对象层不可变快照直接构建导出文档。
  * 以 user/steering 节点为轮边界；assistant* 节点文本归入当前轮。
@@ -679,21 +744,31 @@ function snapshotToMarkdown(snapshot: any, now: number): { markdown: string; fil
     const node = get(key)
     if (!node) continue
     const kind = typeof node.kind === 'string' ? node.kind : ''
-    if (USER_KINDS.has(kind)) {
-      sawAny = true
+    const isUser = kind === 'user'
+    const isSteering = kind === 'steering'
+    if (!isUser && !isSteering && !/assistant/.test(kind)) continue
+    sawAny = true
+    if (isUser) {
+      // user 开启新轮。
       cur = { user: [], ai: [] }
       rounds.push(cur)
+    } else if (isSteering && !cur) {
+      // 会话开头的孤儿 steering：并入隐式首轮。
+      cur = { user: [], ai: [] }
+      rounds.push(cur)
+    }
+    if (!/assistant/.test(kind)) {
+      const bucket = cur!
       for (const b of nodeBlocks(node)) {
         if (!b) continue
         if (b.type === 'text' && typeof b.text === 'string') {
           if (firstRawUser === null && b.text.trim() !== '') firstRawUser = b.text
-          cur.user.push(mdEscapeUser(b.text))
+          bucket.user.push(mdEscapeUser(b.text))
         } else if (b.type === 'image') {
-          cur.user.push(mdEscapeUser(imageLabelOf(b)))
+          bucket.user.push(mdEscapeUser(imageLabelOf(b)))
         }
       }
-    } else if (/assistant/.test(kind) && cur) {
-      sawAny = true
+    } else if (cur) {
       for (const b of nodeBlocks(node)) {
         if (b && b.type === 'text' && typeof b.text === 'string') cur.ai.push(b.text)
       }
@@ -744,8 +819,10 @@ function HistoryPanel({ useSession, onClose }: { useSession: any; onClose: () =>
   const searchRef = useRef<HTMLInputElement | null>(null)
   const snapshot = useSession((s: any) => s)
   const items = useMemo(() => {
-    const list: { key: string; text: string }[] = []
+    const list: { key: string; text: string; round: number }[] = []
     if (!snapshot) return list
+    // 面板可能先于 ExportButton 渲染：此处兜底刷新轮次映射。
+    rebuildRoundMap(snapshot)
     const chat = snapshot.chat
     const order = chat && Array.isArray(chat.order) ? chat.order : []
     const nodes = chat && chat.nodes ? chat.nodes : null
@@ -753,7 +830,7 @@ function HistoryPanel({ useSession, onClose }: { useSession: any; onClose: () =>
       const node = nodes ? (nodes.get ? nodes.get(key) : undefined) : undefined
       if (node && (node.kind === 'user' || node.kind === 'steering')) {
         const text = userNodeText(node)
-        if (text.trim() !== '') list.push({ key, text })
+        if (text.trim() !== '') list.push({ key, text, round: roundByNodeKey.get(key) ?? 0 })
       }
     }
     return list
@@ -788,7 +865,7 @@ function HistoryPanel({ useSession, onClose }: { useSession: any; onClose: () =>
     row.scrollIntoView({ block: 'center', behavior: 'smooth' })
     // 滚动停稳后把悬浮窗吸附到目标行头像旁，几何与直接点击头像完全一致。
     waitForScrollSettle(() => {
-      const img = row!.querySelector<HTMLElement>(':scope > .dsh-gc-avatar')
+      const img = row!.querySelector<HTMLElement>(':scope > .dsh-gc-avatarwrap .dsh-gc-avatar')
       const anchor = img ?? row!
       const r = anchor.getBoundingClientRect()
       lastAvatarRect = { left: r.left, top: r.top }
@@ -800,7 +877,21 @@ function HistoryPanel({ useSession, onClose }: { useSession: any; onClose: () =>
   const left = Math.max(8, Math.min(lastAvatarRect.left - PANEL_W - 8, window.innerWidth - PANEL_W - 8))
   const top = Math.max(8, Math.min(lastAvatarRect.top, window.innerHeight - 200))
 
+  // 回到顶部：滚动容器置顶（全量历史已加载时即最早消息）；容器缺失回退首行定位。
+  const scrollToTop = (): void => {
+    const sc = document.querySelector<HTMLElement>('[data-conversation-scroll]')
+    if (sc) {
+      sc.scrollTop = 0
+      return
+    }
+    const first = document.querySelector('[data-chat-flow-kind]')
+    if (first) first.scrollIntoView({ block: 'start', behavior: 'smooth' })
+  }
+
   return h('div', { className: 'dsh-gc-history', style: { left: left + 'px', top: top + 'px' } },
+    h('div', { className: 'dsh-gc-history-topbar' },
+      h('button', { className: 'dsh-gc-top-btn', onClick: scrollToTop, title: '定位到会话最顶部' }, '回到顶部'),
+    ),
     h('input', {
       className: 'dsh-gc-history-search',
       ref: searchRef,
@@ -816,7 +907,9 @@ function HistoryPanel({ useSession, onClose }: { useSession: any; onClose: () =>
           key: it.key,
           onClick: () => jump(it.key),
           title: it.text,
-        }, it.text)),
+        },
+        h('span', { className: 'dsh-gc-hist-no' }, '#' + (it.round > 0 ? it.round : '?')),
+        it.text)),
     ),
   )
 }
@@ -867,6 +960,8 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
  */
 function ExportButton({ sessionId, useSession, busy }: { sessionId?: string; useSession: any; busy: boolean }) {
   const snapshot = useSession((s: any) => s)
+  // 常驻订阅快照：每次变化刷新 key→轮次 映射（历史窗口序号与头像标签的数据源）。
+  useEffect(() => { rebuildRoundMap(snapshot) }, [snapshot])
   const onClick = (): void => {
     if (!sessionId || busyExport) return
     busyExport = true

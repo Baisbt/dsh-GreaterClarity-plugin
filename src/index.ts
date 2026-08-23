@@ -51,14 +51,20 @@ interface AiSettings {
 interface PluginSettings {
   enabled: boolean
 }
+interface UiSettings {
+  /** 思考链/工具链全局折叠状态，跨页面与跨服务重启持久。 */
+  foldGlobal: 'expanded' | 'folded'
+}
 interface Settings {
   plugin: PluginSettings
+  ui: UiSettings
   export: ExportSettings
   ai: AiSettings
 }
 
 const DEFAULT_SETTINGS: Settings = {
   plugin: { enabled: true },
+  ui: { foldGlobal: 'expanded' },
   export: { showButton: true, mode: 'download', targetDir: '' },
   ai: { showAvatar: true, avatarPath: '', avatarSize: 32, historyCount: 10 },
 }
@@ -136,10 +142,12 @@ function readSettings(): Settings {
   try {
     const raw = JSON.parse(readFileSync(SETTINGS_FILE, 'utf8'))
     const plg = raw && typeof raw.plugin === 'object' ? raw.plugin : {}
+    const ui = raw && typeof raw.ui === 'object' ? raw.ui : {}
     const exp = raw && typeof raw.export === 'object' ? raw.export : {}
     const ai = raw && typeof raw.ai === 'object' ? raw.ai : {}
     return {
       plugin: { ...DEFAULT_SETTINGS.plugin, ...plg },
+      ui: { ...DEFAULT_SETTINGS.ui, ...ui },
       export: { ...DEFAULT_SETTINGS.export, ...exp },
       ai: { ...DEFAULT_SETTINGS.ai, ...ai },
     }
@@ -337,8 +345,9 @@ function buildMarkdown(events: readonly EventLike[], title: string, createdAt: n
         flush()
         break
       case 'user/message': {
+        // 轮次语义：turn 边界定轮；user 开启输入，steering（中途引导）并入当前轮的用户区。
         const src = data && data.source
-        if (src && src.kind === 'user') {
+        if (src && (src.kind === 'user' || src.kind === 'steering')) {
           for (const b of (data.content ?? []) as BlockLike[]) {
             if (b.type === 'text' && typeof b.text === 'string') userTexts.push(escapeUserText(b.text))
             else if (b.type === 'image') userImages.push(escapeUserText(imageLabel(b.attachment)))
@@ -412,11 +421,15 @@ export function apply(ctx: AppContext): void {
           const cur = readSettings()
           // 逐字段类型净化：非法类型不落盘，可调数值统一 clamp。
           const plgIn = patch && typeof patch.plugin === 'object' ? patch.plugin : {}
+          const uiIn = patch && typeof patch.ui === 'object' ? patch.ui : {}
           const expIn = patch && typeof patch.export === 'object' ? patch.export : {}
           const aiIn = patch && typeof patch.ai === 'object' ? patch.ai : {}
           const next: Settings = {
             plugin: {
               enabled: typeof plgIn.enabled === 'boolean' ? plgIn.enabled : cur.plugin.enabled,
+            },
+            ui: {
+              foldGlobal: uiIn.foldGlobal === 'folded' || uiIn.foldGlobal === 'expanded' ? uiIn.foldGlobal : cur.ui.foldGlobal,
             },
             export: {
               showButton: typeof expIn.showButton === 'boolean' ? expIn.showButton : cur.export.showButton,
