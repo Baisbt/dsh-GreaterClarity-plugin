@@ -10,7 +10,6 @@ const API = '/dsh-greater-clarity'
 
 interface Settings {
   plugin: { enabled: boolean }
-  flow: { autoLoadHistory: boolean; maxPages: number }
   export: { showButton: boolean; mode: string; targetDir: string }
   ai: { showAvatar: boolean; avatarPath: string; avatarSize: number; historyCount: number }
 }
@@ -18,7 +17,6 @@ interface Settings {
 // ── 模块级共享状态（跨渲染/会话切换存活）──
 let settings: Settings = {
   plugin: { enabled: true },
-  flow: { autoLoadHistory: true, maxPages: 0 },
   export: { showButton: true, mode: 'download', targetDir: '' },
   ai: { showAvatar: true, avatarPath: '', avatarSize: 32, historyCount: 10 },
 }
@@ -28,10 +26,6 @@ let busyExport = false
 let avatarVersion = 0
 let historyOpen = false
 let lastAvatarRect = { left: 0, top: 0 }
-let busyHistory = false
-// 客户端 cordis ctx（apply 时捕获），用于访问 sessions 服务驱动历史翻页。
-let clientCtx: any = null
-let historyPumpActive = false
 
 const listeners = new Set<() => void>()
 // 层同步钩子：由 apply 注册，使每次状态刷新都把 DOM 层对齐到 enabled 开关。
@@ -40,7 +34,7 @@ function notify(): void {
   listeners.forEach((fn) => fn())
   if (layerSync) layerSync()
 }
-function useStore(): { settings: Settings; foldGlobal: 'expanded' | 'folded'; settingsOpen: boolean; busyExport: boolean; busyHistory: boolean; historyOpen: boolean } {
+function useStore(): { settings: Settings; foldGlobal: 'expanded' | 'folded'; settingsOpen: boolean; busyExport: boolean; historyOpen: boolean } {
   const [, force] = useState(0)
   const forceRef = useRef<() => void>(() => {})
   forceRef.current = () => { force((n) => n + 1) }
@@ -49,7 +43,7 @@ function useStore(): { settings: Settings; foldGlobal: 'expanded' | 'folded'; se
     listeners.add(fn)
     return () => { listeners.delete(fn) }
   }, [])
-  return { settings, foldGlobal, settingsOpen, busyExport, busyHistory, historyOpen }
+  return { settings, foldGlobal, settingsOpen, busyExport, historyOpen }
 }
 
 function fetchJson(path: string, init?: RequestInit): Promise<any> {
@@ -65,7 +59,6 @@ function loadSettings(): void {
       if (d && d.ok && d.settings) {
         settings = {
           plugin: { ...settings.plugin, ...(d.settings.plugin ?? {}) },
-          flow: { ...settings.flow, ...(d.settings.flow ?? {}) },
           export: { ...settings.export, ...(d.settings.export ?? {}) },
           ai: { ...settings.ai, ...(d.settings.ai ?? {}) },
         }
@@ -78,7 +71,6 @@ function loadSettings(): void {
 function saveSettings(patch: Partial<Settings>): void {
   settings = {
     plugin: { ...settings.plugin, ...(patch.plugin ?? {}) },
-    flow: { ...settings.flow, ...(patch.flow ?? {}) },
     export: { ...settings.export, ...(patch.export ?? {}) },
     ai: { ...settings.ai, ...(patch.ai ?? {}) },
   }
@@ -88,7 +80,6 @@ function saveSettings(patch: Partial<Settings>): void {
       if (d && d.ok && d.settings) {
         settings = {
           plugin: { ...settings.plugin, ...(d.settings.plugin ?? {}) },
-          flow: { ...settings.flow, ...(d.settings.flow ?? {}) },
           export: { ...settings.export, ...(d.settings.export ?? {}) },
           ai: { ...settings.ai, ...(d.settings.ai ?? {}) },
         }
@@ -580,7 +571,7 @@ function AiPane() {
     h('div', { className: 'dsh-gc-row' },
       h('div', null,
         h('div', { className: 'dsh-gc-label' }, '头像大小'),
-        h('div', { className: 'dsh-gc-hint' }, '16 – 128 px'),
+        h('div', { className: 'dsh-gc-hint' }, '16 – 128 px，可直接输入数字'),
       ),
       h('input', {
         className: 'dsh-gc-range', type: 'range', min: 16, max: 128, step: 1,
@@ -830,43 +821,8 @@ function HistoryPanel({ useSession, onClose }: { useSession: any; onClose: () =>
   )
 }
 
-/** 对话流设置：历史自动加载行为配置。 */
-function FlowPane() {
-  const s = useStore().settings
-  const commitMax = (v: number): void => {
-    saveSettings({ flow: { ...s.flow, maxPages: clampMaxPages(v) } })
-  }
-  return h('div', null,
-    h('div', { className: 'dsh-gc-row' },
-      h('div', null,
-        h('div', { className: 'dsh-gc-label' }, '自动加载完整历史记录'),
-        h('div', { className: 'dsh-gc-hint' }, '进入会话后自动把更早的历史逐页加载全（仅当前会话窗口），保证导出内容完整'),
-      ),
-      h(Toggle, {
-        checked: s.flow.autoLoadHistory !== false,
-        onChange: (v) => saveSettings({ flow: { ...s.flow, autoLoadHistory: v } }),
-      }),
-    ),
-    h('div', { className: 'dsh-gc-row' },
-      h('div', null,
-        h('div', { className: 'dsh-gc-label' }, '单会话加载页数上限'),
-        h('div', { className: 'dsh-gc-hint' }, '每页约 50 条；0 = 不限制。防止极端超长会话占用过多内存'),
-      ),
-      h('input', {
-        className: 'dsh-gc-num',
-        type: 'number',
-        min: 0,
-        max: 500,
-        step: 1,
-        value: clampMaxPages(s.flow.maxPages),
-        onChange: (e: any) => { const v = Number(e.target.value); if (Number.isFinite(v)) commitMax(v) },
-      }),
-    ),
-  )
-}
-
 function SettingsModal({ onClose }: { onClose: () => void }) {
-  const [tab, setTab] = useState<'export' | 'flow' | 'ai'>('export')
+  const [tab, setTab] = useState<'export' | 'ai'>('export')
   const doUninstall = (): void => {
     if (!window.confirm('卸载 GreaterClarity？\n将清除全部设置与上传的头像，插件随即停用（重启后仍保持停用）。')) return
     fetchJson('/uninstall', { method: 'POST', body: '{}' })
@@ -891,11 +847,10 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
       h('div', { className: 'dsh-gc-modal-body' },
         h('div', { className: 'dsh-gc-nav' },
           h('button', { className: 'dsh-gc-nav-item' + (tab === 'export' ? ' active' : ''), onClick: () => setTab('export') }, '导出'),
-          h('button', { className: 'dsh-gc-nav-item' + (tab === 'flow' ? ' active' : ''), onClick: () => setTab('flow') }, '对话流设置'),
           h('button', { className: 'dsh-gc-nav-item' + (tab === 'ai' ? ' active' : ''), onClick: () => setTab('ai') }, 'AI 设置'),
         ),
         h('div', { className: 'dsh-gc-content' },
-          tab === 'export' ? h(ExportPane) : tab === 'flow' ? h(FlowPane) : h(AiPane),
+          tab === 'export' ? h(ExportPane) : h(AiPane),
         ),
       ),
       h('div', { className: 'dsh-gc-modal-foot' },
@@ -937,63 +892,6 @@ function ExportButton({ sessionId, useSession, busy }: { sessionId?: string; use
   }, busy ? '导出中…' : '导出')
 }
 
-/** 单会话最大加载页数：0 = 不限制。与 Host 端 HISTORY_PAGES_MAX 上限一致。 */
-function clampMaxPages(n: number): number {
-  const num = Number.isFinite(n) ? n : 0
-  return Math.min(500, Math.max(0, Math.round(num)))
-}
-
-/**
- * 自动加载当前会话完整历史：驱动官方 sessions 服务的 loadOlder() 逐页串行翻页，
- * 直到快照 hasMore=false（或达到配置上限）。仅作用于当前打开的会话窗口；
- * 切换会话时 effect 重挂载、旧泵取消。依赖非契约 API（ui-trajectory 同款用法）。
- */
-function HistoryLoader({ sessionId, useSession }: { sessionId?: string; useSession: any }) {
-  const store = useStore()
-  const enabled = store.settings.plugin.enabled !== false && store.settings.flow.autoLoadHistory !== false
-
-  useEffect(() => {
-    if (!enabled || !sessionId || !clientCtx) return
-    let cancelled = false
-    ;(async (): Promise<void> => {
-      if (historyPumpActive) return
-      const session = clientCtx?.sessions?.binding?.(sessionId)?.session
-      if (!session || typeof session.loadOlder !== 'function') return
-      historyPumpActive = true
-      try {
-        let snap: any = null
-        // 等待会话窗口就位（staging → open），有界等待约 5 秒。
-        for (let i = 0; i < 50; i++) {
-          snap = typeof session.getSnapshot === 'function' ? session.getSnapshot() : null
-          if (!snap || snap.openState === 'open' || cancelled) break
-          await new Promise((r) => setTimeout(r, 100))
-        }
-        let pages = 0
-        // 串行 await 循环：loadOlder 在途时并发调用会被运行时静默吞掉，禁止并行。
-        while (!cancelled) {
-          snap = typeof session.getSnapshot === 'function' ? session.getSnapshot() : null
-          if (!snap || snap.openState !== 'open' || !snap.hasMore) break
-          const maxPages = clampMaxPages(settings.flow.maxPages)
-          if (maxPages > 0 && pages >= maxPages) break
-          busyHistory = true
-          notify()
-          await session.loadOlder()
-          pages += 1
-        }
-      } catch {
-        // 翻页异常不外泄：保留 DSH 默认窗口，导出仍有服务端兜底。
-      } finally {
-        historyPumpActive = false
-        busyHistory = false
-        notify()
-      }
-    })()
-    return () => { cancelled = true }
-  }, [sessionId, enabled])
-
-  return null
-}
-
 function Buttons({ sessionId, useSession }: { sessionId?: string; useSession?: any }) {
   const store = useStore()
   const folded = store.foldGlobal === 'folded'
@@ -1016,11 +914,7 @@ function Buttons({ sessionId, useSession }: { sessionId?: string; useSession?: a
   }
 
   return h(Fragment, null,
-    useSession ? h(HistoryLoader, { sessionId, useSession }) : null,
     h('div', { className: 'dsh-gc-btns' },
-      store.busyHistory
-        ? h('button', { className: 'dsh-gc-btn', disabled: true, title: '正在逐页加载更早的历史消息…' }, '加载历史…')
-        : null,
       h('button', {
         className: 'dsh-gc-btn',
         onClick: toggleGlobalFold,
@@ -1054,9 +948,6 @@ function Buttons({ sessionId, useSession }: { sessionId?: string; useSession?: a
 export const inject = ['slots']
 
 export function apply(ctx: any): void {
-  // 0) 捕获客户端 ctx：HistoryLoader 经它访问 sessions 服务驱动历史翻页
-  clientCtx = ctx
-
   // 1) 注入样式（停用态的「启用」入口按钮仍需要）
   ctx.effect(() => {
     const style = document.createElement('style')
