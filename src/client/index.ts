@@ -27,16 +27,9 @@ let settingsOpen = false
 let busyExport = false
 let avatarVersion = 0
 let historyOpen = false
-// 锚点几何：面板水平恒紧贴锚点头像左侧（右缘 = 头像左缘 - 8）。
-let lastAvatarRect = { left: 0, top: 0 }
-// 快速定位跳转的辅助状态。
-let jumpGen = 0 // 跳转代际：新跳转让旧的停稳回调作废，杜绝连点错乱
-let panelH = 320 // 实测面板高度缓存（渲染后测量，用于垂直居中）
+// 快速定位面板：锚定在「历史」按钮正下方。
+let panelH = 320 // 实测面板高度缓存（渲染后测量，用于边界钳制）
 const JUMP_TOP_PAD = 12 // 跳转后行首距滚动容器顶部的留白
-// 回到顶部 + 自动加载更早。
-let backToTopBusy = false
-let backToTopGen = 0 // 代际令牌：新点击/切会话/关面板即取消旧加载
-const BACK_TO_TOP_MAX_PAGES = 500 // 安全上限（每页约 50 条）
 
 const listeners = new Set<() => void>()
 // 层同步钩子：由 apply 注册，使每次状态刷新都把 DOM 层对齐到 enabled 开关。
@@ -115,12 +108,18 @@ function triggerDownload(markdown: string, filename: string): void {
   setTimeout(() => { URL.revokeObjectURL(url) }, 1000)
 }
 
+/** 导出文件名的时间戳段（点分日期，本地时区）：2026.8.24。 */
+function fmtStamp(ms: number): string {
+  const d = new Date(ms - new Date().getTimezoneOffset() * 60000)
+  return `${d.getFullYear()}.${d.getMonth() + 1}.${d.getDate()}`
+}
+
 /** 服务端兜底导出：Host 读盘构建完整文档（客户端快照不可用时走这里）。 */
-function exportViaServer(sessionId: string | undefined): void {
+function exportViaServer(sessionId: string | undefined, partial: boolean): void {
   if (!sessionId || busyExport) return
   busyExport = true
   notify()
-  fetchJson('/export', { method: 'POST', body: JSON.stringify({ sessionId, now: Date.now(), tzOffsetMin: -new Date().getTimezoneOffset() }) })
+  fetchJson('/export', { method: 'POST', body: JSON.stringify({ sessionId, now: Date.now(), tzOffsetMin: -new Date().getTimezoneOffset(), partial }) })
     .then((d) => {
       if (d && d.ok && d.markdown) {
         triggerDownload(d.markdown, d.filename || '会话.md')
@@ -155,8 +154,6 @@ const STYLES = `
 @container (max-width:900px){
   .dsh-gc-avatarwrap{position:static;float:left;margin:2px 8px 4px 0}
 }
-.dsh-gc-sticky{position:fixed;top:8px;z-index:90;border-radius:50%;object-fit:cover;cursor:pointer;
-  border:1px solid var(--dsw-alias-border-l1,#555);box-shadow:0 2px 8px rgba(0,0,0,.3)}
 [data-dsh-gc-hidden]{display:none !important}
 [data-dsh-gc-folded] [data-variant="think"]{display:none !important}
 .dsh-gc-modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:99990;
@@ -206,12 +203,13 @@ const STYLES = `
   display:flex;flex-direction:column;background:var(--dsw-alias-bg-overlay,#fff);
   border:1px solid var(--dsw-alias-border-l2,#333);border-radius:10px;
   box-shadow:0 8px 28px rgba(0,0,0,.3);overflow:hidden;color:var(--dsw-alias-label-primary,#222);font-size:12px}
-.dsh-gc-history-topbar{flex:none;padding:8px 8px 0}
-.dsh-gc-top-btn{display:block;width:100%;padding:6px;border-radius:6px;font-size:12px;cursor:pointer;
+.dsh-gc-history-topbar{flex:none;display:flex;align-items:center;gap:8px;padding:8px 8px 0}
+.dsh-gc-top-btn{flex:1;min-width:0;padding:6px;border-radius:6px;font-size:12px;cursor:pointer;
   border:1px solid var(--dsw-alias-border-l1,#555);background:var(--dsw-alias-bg-layer-1,#1e1e1e);
   color:var(--dsw-alias-brand-primary,#4a9eff)}
 .dsh-gc-top-btn:hover{border-color:var(--dsw-alias-brand-primary,#4a9eff)}
-.dsh-gc-hist-no{display:inline-block;min-width:24px;margin-right:6px;padding:1px 5px;border-radius:6px;text-align:center;
+.dsh-gc-history-hint{flex:none;font-size:11px;color:var(--dsw-alias-state-error-primary,#e05252);white-space:nowrap}
+.dsh-gc-hist-no{display:inline-block;margin-right:6px;padding:1px 6px;border-radius:6px;text-align:center;
   background:var(--dsw-alias-button-info-fill,#4a9eff);color:#fff;font-weight:600}
 .dsh-gc-history-search{flex:none;margin:8px 8px 4px;padding:6px 10px;border-radius:6px;
   background:var(--dsw-alias-bg-layer-1,#1e1e1e);color:var(--dsw-alias-label-primary,#ddd);
@@ -244,21 +242,6 @@ function startLayer(): void {
     scheduleProcessRows()
   })
   observer.observe(document.body, { childList: true, subtree: true })
-  const onScroll = (): void => {
-    positionSticky()
-    updateStickyVisibility()
-  }
-  const onResize = (): void => {
-    positionSticky()
-    updateStickyVisibility()
-    notify()
-  }
-  document.addEventListener('scroll', onScroll, true)
-  window.addEventListener('resize', onResize)
-  scrollCleanup = () => {
-    document.removeEventListener('scroll', onScroll, true)
-    window.removeEventListener('resize', onResize)
-  }
   scheduleProcessRows()
 }
 
@@ -267,7 +250,6 @@ function stopLayer(): void {
   layerActive = false
   if (observer) { observer.disconnect(); observer = null }
   if (processTimer !== null) { window.clearTimeout(processTimer); processTimer = null }
-  if (scrollCleanup) { scrollCleanup(); scrollCleanup = null }
   clearAvatarLayer()
 }
 
@@ -291,7 +273,6 @@ function clampHistoryCount(n: number): number {
 function processRows(): void {
   ensureAvatars()
   applyFold()
-  ensureStickyAvatar()
 }
 
 function ensureAvatars(): void {
@@ -311,11 +292,6 @@ function ensureAvatars(): void {
       img.className = 'dsh-gc-avatar'
       img.alt = 'AI 头像'
       img.draggable = false
-      img.addEventListener('click', (e) => {
-        e.stopPropagation()
-        const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
-        openHistory(rect)
-      })
       const label = document.createElement('div')
       label.className = 'dsh-gc-round'
       wrap.appendChild(img)
@@ -382,12 +358,6 @@ function applyFold(): void {
   }
 }
 
-function openHistory(rect: DOMRect): void {
-  lastAvatarRect = { left: rect.left, top: rect.top }
-  historyOpen = true
-  notify()
-}
-
 function toggleGlobalFold(): void {
   foldGlobal = foldGlobal === 'folded' ? 'expanded' : 'folded'
   // 持久化全局折叠状态（跨页面/服务重启还原）。
@@ -396,144 +366,10 @@ function toggleGlobalFold(): void {
   scheduleProcessRows()
 }
 
-/**
- * 等待滚动停稳：捕获阶段监听全文档 scroll，静默 150ms 视为停稳，1200ms 兜底超时。
- * 相比轮询固定容器，可覆盖任何实际发生滚动的祖先容器。
- * 快速连续触发时，新等待会取消尚未完成的旧等待——只认最后一次。
- */
-let cancelActiveSettle: (() => void) | null = null
-
-function waitForScrollSettle(onSettle: () => void): void {
-  if (cancelActiveSettle) cancelActiveSettle()
-  let done = false
-  let quietTimer: number | null = null
-  let hardTimer: number
-  const cancelThis = (): void => {
-    if (done) return
-    done = true
-    if (quietTimer !== null) window.clearTimeout(quietTimer)
-    window.clearTimeout(hardTimer)
-    document.removeEventListener('scroll', onScroll, true)
-  }
-  const finish = (): void => {
-    if (done) return
-    done = true
-    if (quietTimer !== null) window.clearTimeout(quietTimer)
-    window.clearTimeout(hardTimer)
-    document.removeEventListener('scroll', onScroll, true)
-    if (cancelActiveSettle === cancelThis) cancelActiveSettle = null
-    onSettle()
-  }
-  const onScroll = (): void => {
-    if (quietTimer !== null) window.clearTimeout(quietTimer)
-    quietTimer = window.setTimeout(finish, 150)
-  }
-  hardTimer = window.setTimeout(finish, 1200)
-  document.addEventListener('scroll', onScroll, true)
-  cancelActiveSettle = cancelThis
-}
-
-// ════════════════════════════════════════════════════════════════════
-// 顶部固定头像（视口内头像覆盖率 <25% 时显示，点击打开历史窗口）
-// ════════════════════════════════════════════════════════════════════
-let stickyEl: HTMLImageElement | null = null
-
-function ensureStickyAvatar(): void {
-  if (!settings.ai.showAvatar) {
-    removeSticky()
-    return
-  }
-  if (!stickyEl) {
-    stickyEl = document.createElement('img')
-    stickyEl.className = 'dsh-gc-sticky'
-    stickyEl.alt = 'AI 头像'
-    stickyEl.draggable = false
-    stickyEl.addEventListener('click', (e) => {
-      e.stopPropagation()
-      const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
-      openHistory(rect)
-    })
-    document.body.appendChild(stickyEl)
-  }
-  const size = clampAvatarSize(settings.ai.avatarSize)
-  stickyEl.style.width = size + 'px'
-  stickyEl.style.height = size + 'px'
-  stickyEl.src = `${API}/avatar?v=${avatarVersion}`
-  positionSticky()
-  updateStickyVisibility()
-}
-
-function removeSticky(): void {
-  if (stickyEl) { stickyEl.remove(); stickyEl = null }
-}
-
-function positionSticky(): void {
-  if (!stickyEl) return
-  let left = 8
-  const sample = document.querySelector('.dsh-gc-avatar')
-  if (sample) {
-    left = Math.max(8, sample.getBoundingClientRect().left)
-  } else {
-    const anchor = document.querySelector('[data-chat-flow-kind]')
-    if (anchor) left = Math.max(8, anchor.getBoundingClientRect().left - clampAvatarSize(settings.ai.avatarSize) - 8)
-  }
-  // 垂直：挂在会话滚动区 [data-conversation-scroll] 顶部下方（避开全局 header）。
-  let top = 8
-  const scrollCtx = document.querySelector('[data-conversation-scroll]')
-  if (scrollCtx) {
-    const r = scrollCtx.getBoundingClientRect()
-    if (r.top > 0) top = Math.max(32, r.top + 4)
-  }
-  stickyEl.style.left = left + 'px'
-  stickyEl.style.top = top + 'px'
-}
-
-/** 单采样点可见：在视口内且命中测试返回头像自身（未被 session log 等浮层遮挡）。 */
-function avatarPointVisible(img: HTMLElement, x: number, y: number): boolean {
-  if (x < 0 || y < 0 || x >= window.innerWidth || y >= window.innerHeight) return false
-  return document.elementFromPoint(x, y) === img
-}
-
-/**
- * 头像可见性：中心 + 四个内对角采样点（圆形头像的几何角点在圆外，不可用），
- * 任一采样点未遮挡即在视口内 → 可见（隐藏 sticky）；全部被遮挡/出视口 → 显示 sticky。
- */
-function avatarVisible(img: HTMLElement): boolean {
-  const r = img.getBoundingClientRect()
-  if (r.width <= 0 || r.height <= 0) return false
-  if (r.bottom <= 0 || r.top >= window.innerHeight || r.right <= 0 || r.left >= window.innerWidth) return false
-  const cx = r.left + r.width / 2
-  const cy = r.top + r.height / 2
-  const d = Math.min(r.width, r.height) * 0.35
-  const samples: Array<[number, number]> = [
-    [cx, cy],
-    [cx - d, cy - d], [cx + d, cy - d],
-    [cx - d, cy + d], [cx + d, cy + d],
-  ]
-  for (const [x, y] of samples) {
-    if (avatarPointVisible(img, x, y)) return true
-  }
-  return false
-}
-
-function updateStickyVisibility(): void {
-  if (!stickyEl) return
-  // 视口内存在任一未被遮挡的普通头像 → 隐藏；否则显示。
-  const avatars = document.querySelectorAll<HTMLElement>('.dsh-gc-avatar')
-  for (let i = 0; i < avatars.length; i++) {
-    if (avatarVisible(avatars[i])) {
-      stickyEl.style.display = 'none'
-      return
-    }
-  }
-  stickyEl.style.display = ''
-}
-
 function clearAvatarLayer(): void {
   document.querySelectorAll('.dsh-gc-avatarwrap').forEach((el) => el.remove())
   document.querySelectorAll('[data-dsh-gc-hidden]').forEach((el) => el.removeAttribute('data-dsh-gc-hidden'))
   document.querySelectorAll('[data-dsh-gc-folded]').forEach((el) => el.removeAttribute('data-dsh-gc-folded'))
-  removeSticky()
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -744,7 +580,7 @@ function roundLabelForRow(row: HTMLElement | null): string {
  * 以 user/steering 节点为轮边界；assistant* 节点文本归入当前轮。
  * 结构防御式读取：任何缺失/变形都返回 null，由调用方回退服务端路径。
  */
-function snapshotToMarkdown(snapshot: any, now: number): { markdown: string; filename: string } | null {
+function snapshotToMarkdown(snapshot: any, now: number, preferredTitle = ''): { markdown: string; title: string } | null {
   if (!snapshot) return null
   const chat = snapshot.chat
   const order = chat && Array.isArray(chat.order) ? chat.order : []
@@ -783,8 +619,9 @@ function snapshotToMarkdown(snapshot: any, now: number): { markdown: string; fil
   }
   if (!sawAny || rounds.length === 0) return null
 
-  // 标题：快照标题 → 首条用户输入截断 → 兜底「会话」。
-  let title = typeof snapshot.title === 'string' ? snapshot.title.trim() : ''
+  // 标题：侧栏工作区标题（displayTitle）→ 快照标题 → 首条用户输入截断 → 兜底「会话」。
+  let title = preferredTitle.trim() !== '' ? preferredTitle.trim()
+    : typeof snapshot.title === 'string' ? snapshot.title.trim() : ''
   if (title === '' && firstRawUser !== null) title = firstRawUser.replace(/[#>\r\n]/g, ' ').trim().slice(0, 24)
   if (title === '') title = '会话'
 
@@ -818,14 +655,15 @@ function snapshotToMarkdown(snapshot: any, now: number): { markdown: string; fil
     out.push('---')
     out.push('')
   })
-  return { markdown: out.join('\n').trimEnd() + '\n', filename: safeFilenameClient(title) }
+  return { markdown: out.join('\n').trimEnd() + '\n', title }
 }
 
-function HistoryPanel({ useSession, onClose }: { useSession: any; onClose: () => void }) {
+function HistoryPanel({ anchorRef, useSession, onClose }: { anchorRef: { current: HTMLButtonElement | null }; useSession: any; onClose: () => void }) {
   const [query, setQuery] = useState('')
   const searchRef = useRef<HTMLInputElement | null>(null)
   const panelRef = useRef<HTMLDivElement | null>(null)
   const snapshot = useSession((s: any) => s)
+  const hasMore = useSession((s: any) => !!s?.hasMore)
   const items = useMemo(() => {
     const list: { key: string; text: string; round: number }[] = []
     if (!snapshot) return list
@@ -850,16 +688,9 @@ function HistoryPanel({ useSession, onClose }: { useSession: any; onClose: () =>
   const n = clampHistoryCount(settings.ai.historyCount)
   const listHeight = Math.max(5, Math.min(n, filtered.length || 1)) * rowH
 
-  useEffect(() => {
-    const onDocClick = (e: MouseEvent): void => {
-      const target = e.target as HTMLElement
-      if (target.closest('.dsh-gc-history') || target.closest('.dsh-gc-avatar')) return
-      if ((searchRef.current && searchRef.current.value.trim()) === '') onClose()
-    }
-    document.addEventListener('click', onDocClick, true)
-    return () => { document.removeEventListener('click', onDocClick, true) }
-  }, [onClose])
+  // 面板持续悬停：不随点击外部关闭，仅随「历史」按钮 toggle 开/关。
 
+  // 跳转定位到输入第一行：行顶对齐滚动容器顶部下方少许，长输入不再垂直居中。
   const jump = (key: string): void => {
     const rows = document.querySelectorAll('[data-chat-anchor-key]')
     let row: HTMLElement | null = null
@@ -870,8 +701,6 @@ function HistoryPanel({ useSession, onClose }: { useSession: any; onClose: () =>
       }
     }
     if (!row) return
-    const gen = ++jumpGen
-    // 定位到输入第一行：行顶对齐滚动容器顶部下方少许，长输入不再垂直居中。
     const container = document.querySelector<HTMLElement>('[data-conversation-scroll]')
     if (container) {
       const cTop = container.getBoundingClientRect().top
@@ -880,45 +709,15 @@ function HistoryPanel({ useSession, onClose }: { useSession: any; onClose: () =>
     } else {
       row.scrollIntoView({ block: 'start', behavior: 'smooth' })
     }
-    // 停稳后重吸附：锚点 X 依次回退 目标行头像左缘（视口内）→ sticky 头像左缘 → 行首左缘。
-    waitForScrollSettle(() => {
-      if (gen !== jumpGen) return
-      let anchorLeft = 0
-      let anchorTop = 0
-      const img = row!.querySelector<HTMLElement>(':scope > .dsh-gc-avatarwrap .dsh-gc-avatar')
-      if (img) {
-        const r = img.getBoundingClientRect()
-        if (r.width > 0 && r.top >= 8 && r.bottom <= window.innerHeight - 8) {
-          anchorLeft = r.left
-          anchorTop = r.top
-        }
-      }
-      if (anchorLeft === 0 && anchorTop === 0) {
-        const sticky = document.querySelector<HTMLElement>('.dsh-gc-sticky')
-        if (sticky && sticky.style.display !== 'none') {
-          const sr = sticky.getBoundingClientRect()
-          if (sr.width > 0) {
-            anchorLeft = sr.left
-            anchorTop = sr.top
-          }
-        }
-      }
-      if (anchorLeft === 0 && anchorTop === 0) {
-        const rr = row!.getBoundingClientRect()
-        anchorLeft = rr.left
-        anchorTop = rr.top
-      }
-      lastAvatarRect = { left: anchorLeft, top: anchorTop }
-      notify()
-    })
   }
 
   const PANEL_W = 300
-  // 水平：紧贴 AI 头像左侧（右缘 = 头像左缘 - 8）；头像尺寸变化时随其左缘像素级偏移。
-  let left = lastAvatarRect.left - PANEL_W - 8
+  // 位置：锚定在「历史」按钮正下方（左缘对齐按钮左缘，顶 = 按钮底 + 8），越界钳制在屏幕内。
+  const br = anchorRef.current ? anchorRef.current.getBoundingClientRect() : null
+  let left = br ? br.left : 8
+  let top = br ? br.bottom + 8 : 60
   left = Math.max(8, Math.min(left, window.innerWidth - PANEL_W - 8))
-  // 垂直：窗口中心固定为屏幕中间高度，不随头像位置或其他因素变化。
-  const top = Math.max(8, Math.round((window.innerHeight - panelH) / 2))
+  top = Math.max(8, Math.min(top, window.innerHeight - panelH - 8))
 
   useEffect(() => {
     const el = panelRef.current
@@ -939,6 +738,7 @@ function HistoryPanel({ useSession, onClose }: { useSession: any; onClose: () =>
   return h('div', { ref: panelRef, className: 'dsh-gc-history', style: { left: left + 'px', top: top + 'px' } },
     h('div', { className: 'dsh-gc-history-topbar' },
       h('button', { className: 'dsh-gc-top-btn', onClick: scrollToTop, title: '定位到会话最顶部' }, '回到顶部'),
+      hasMore ? h('span', { className: 'dsh-gc-history-hint' }, '历史未加载完全') : null,
     ),
     h('input', {
       className: 'dsh-gc-history-search',
@@ -956,7 +756,7 @@ function HistoryPanel({ useSession, onClose }: { useSession: any; onClose: () =>
           onClick: () => jump(it.key),
           title: it.text,
         },
-        h('span', { className: 'dsh-gc-hist-no' }, '#' + (it.round > 0 ? it.round : '?')),
+        h('span', { className: 'dsh-gc-hist-no' }, it.round > 0 ? `第${it.round}轮` : '第?轮'),
         it.text)),
     ),
   )
@@ -1014,10 +814,22 @@ function ExportButton({ sessionId, useSession, busy }: { sessionId?: string; use
     if (!sessionId || busyExport) return
     busyExport = true
     notify()
+    const partial = !!snapshot?.hasMore
+    // 标题优先取侧栏工作区显示的 displayTitle（sessions 列表 store 投影）。
+    let listTitle = ''
     try {
-      const direct = snapshotToMarkdown(snapshot, Date.now())
+      const entry: any = sessionId && clientCtx?.sessions?.list?.getSnapshot?.()
+        ? clientCtx.sessions.list.getSnapshot().byId?.[sessionId]
+        : null
+      if (entry && typeof entry.displayTitle === 'string' && entry.displayTitle.trim() !== '') listTitle = entry.displayTitle
+    } catch {
+      // 列表 store 不可用时回退快照标题链
+    }
+    try {
+      const direct = snapshotToMarkdown(snapshot, Date.now(), listTitle)
       if (direct) {
-        triggerDownload(direct.markdown, direct.filename)
+        const filename = (partial ? '未加载完全历史对话_' : '') + fmtStamp(Date.now()) + '_' + safeFilenameClient(direct.title)
+        triggerDownload(direct.markdown, filename)
         busyExport = false
         notify()
         return
@@ -1025,7 +837,7 @@ function ExportButton({ sessionId, useSession, busy }: { sessionId?: string; use
     } catch {
       // 快照结构不符合预期 → 服务端兜底
     }
-    exportViaServer(sessionId)
+    exportViaServer(sessionId, partial)
   }
   return h('button', {
     className: 'dsh-gc-btn',
@@ -1039,6 +851,7 @@ function Buttons({ sessionId, useSession }: { sessionId?: string; useSession?: a
   const store = useStore()
   const folded = store.foldGlobal === 'folded'
   const enabled = store.settings.plugin.enabled !== false
+  const historyBtnRef = useRef<HTMLButtonElement | null>(null)
 
   // 停用态：只保留「启用」入口，其余功能与 DOM 层全部下线。
   if (!enabled) {
@@ -1056,6 +869,11 @@ function Buttons({ sessionId, useSession }: { sessionId?: string; useSession?: a
     notify()
   }
 
+  const toggleHistory = (): void => {
+    historyOpen = !historyOpen
+    notify()
+  }
+
   return h(Fragment, null,
     h('div', { className: 'dsh-gc-btns' },
       h('button', {
@@ -1069,18 +887,25 @@ function Buttons({ sessionId, useSession }: { sessionId?: string; useSession?: a
           ? h(ExportButton, { sessionId, useSession, busy: store.busyExport })
           : h('button', {
             className: 'dsh-gc-btn',
-            onClick: () => exportViaServer(sessionId),
+            onClick: () => exportViaServer(sessionId, false),
             disabled: !sessionId || store.busyExport,
             title: '导出 Markdown',
           }, store.busyExport ? '导出中…' : '导出'))
         : null,
+      h('button', {
+        ref: historyBtnRef,
+        className: 'dsh-gc-btn dsh-gc-history-btn',
+        onClick: toggleHistory,
+        title: '历史记录快速定位',
+        'aria-pressed': store.historyOpen,
+      }, '历史'),
       h('button', { className: 'dsh-gc-btn', onClick: openSettings, title: '设置' }, '设置'),
     ),
     store.settingsOpen
       ? createPortal(h(SettingsModal, { onClose: () => { settingsOpen = false; notify() } }), document.body)
       : null,
     store.historyOpen && useSession
-      ? createPortal(h(HistoryPanel, { sessionId, useSession, onClose: () => { historyOpen = false; notify() } }), document.body)
+      ? createPortal(h(HistoryPanel, { anchorRef: historyBtnRef, useSession, onClose: () => { historyOpen = false; notify() } }), document.body)
       : null,
   )
 }
