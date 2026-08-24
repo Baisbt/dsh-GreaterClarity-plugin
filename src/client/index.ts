@@ -535,10 +535,20 @@ function imageLabelOf(b: any): string {
 
 function nodeBlocks(node: any): any[] {
   const d = (node && node.data) || {}
+  // user 节点载荷在 data.content；assistant-step 节点载荷在 data.blocks
+  // （DSH 源码 assistant.ts buildViewNode）；再兜底 data.message.content。
   if (Array.isArray(d.content)) return d.content
+  if (Array.isArray(d.blocks)) return d.blocks
   const m = d.message
   if (m && Array.isArray(m.content)) return m.content
   return []
+}
+
+/** 内容块的文本判别：user 块用 type，assistant 块用 kind（reasoning=思考链，不采集）。 */
+function blockText(b: any): string | null {
+  if (!b) return null
+  const t = b.type ?? b.kind
+  return t === 'text' && typeof b.text === 'string' ? b.text : null
 }
 
 // ── 轮次映射：每条用户输入（user/steering）独立递增（A 语义）──
@@ -604,16 +614,19 @@ function snapshotToMarkdown(snapshot: any, now: number, preferredTitle = ''): { 
       rounds.push(cur)
       for (const b of nodeBlocks(node)) {
         if (!b) continue
-        if (b.type === 'text' && typeof b.text === 'string') {
-          if (firstRawUser === null && b.text.trim() !== '') firstRawUser = b.text
-          cur.user.push(mdEscapeUser(b.text))
-        } else if (b.type === 'image') {
+        const text = blockText(b)
+        if (text !== null) {
+          if (firstRawUser === null && text.trim() !== '') firstRawUser = text
+          cur.user.push(mdEscapeUser(text))
+        } else if ((b.type ?? b.kind) === 'image') {
           cur.user.push(mdEscapeUser(imageLabelOf(b)))
         }
       }
     } else if (cur) {
+      // 仅采集 kind/type === 'text' 的最终输出；reasoning（思考链）与工具链天然跳过。
       for (const b of nodeBlocks(node)) {
-        if (b && b.type === 'text' && typeof b.text === 'string') cur.ai.push(b.text)
+        const text = blockText(b)
+        if (text !== null) cur.ai.push(text)
       }
     }
   }
