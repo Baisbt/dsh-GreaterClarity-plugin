@@ -366,7 +366,7 @@ function buildMarkdown(events: readonly EventLike[], title: string, createdAt: n
 }
 
 function safeFilename(title: string): string {
-  const cleaned = title.replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim()
+  const cleaned = title.replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim().replace(/\.md$/i, '')
   return (cleaned || '会话') + '.md'
 }
 
@@ -498,8 +498,13 @@ export function apply(ctx: AppContext): void {
         const now = typeof payload.now === 'number' ? payload.now : Date.now()
         const tzOffsetMin = typeof payload.tzOffsetMin === 'number' ? payload.tzOffsetMin : -new Date().getTimezoneOffset()
         const markdown = buildMarkdown(snapshot.events, title, snapshot.session.createdAt, now, tzOffsetMin)
+        // 文件名：会话存在未加载完全的历史时加前缀；时间戳取客户端本地日期（点分）。
+        const stampD = new Date(now + tzOffsetMin * 60000)
+        const stamp = `${stampD.getUTCFullYear()}.${stampD.getUTCMonth() + 1}.${stampD.getUTCDate()}`
+        const prefix = payload.partial === true ? '未加载完全历史对话_' : ''
+        const filename = prefix + stamp + '_' + safeFilename(title)
         res.writeHead(200, JSON_HEADERS)
-        res.end(JSON.stringify({ ok: true, markdown, filename: safeFilename(title) }))
+        res.end(JSON.stringify({ ok: true, markdown, filename }))
       } catch (err) {
         respondError(res, err)
       }

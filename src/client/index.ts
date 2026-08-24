@@ -115,11 +115,11 @@ function fmtStamp(ms: number): string {
 }
 
 /** 服务端兜底导出：Host 读盘构建完整文档（客户端快照不可用时走这里）。 */
-function exportViaServer(sessionId: string | undefined, partial: boolean): void {
+function exportViaServer(sessionId: string | undefined, partial: boolean, title?: string): void {
   if (!sessionId || busyExport) return
   busyExport = true
   notify()
-  fetchJson('/export', { method: 'POST', body: JSON.stringify({ sessionId, now: Date.now(), tzOffsetMin: -new Date().getTimezoneOffset(), partial }) })
+  fetchJson('/export', { method: 'POST', body: JSON.stringify({ sessionId, now: Date.now(), tzOffsetMin: -new Date().getTimezoneOffset(), partial, title }) })
     .then((d) => {
       if (d && d.ok && d.markdown) {
         triggerDownload(d.markdown, d.filename || '会话.md')
@@ -520,7 +520,7 @@ function fmtLocal(ms: number): string {
 }
 
 function safeFilenameClient(title: string): string {
-  const cleaned = title.replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim()
+  const cleaned = title.replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim().replace(/\.md$/i, '')
   return (cleaned || '会话') + '.md'
 }
 
@@ -837,7 +837,7 @@ function ExportButton({ sessionId, useSession, busy }: { sessionId?: string; use
     } catch {
       // 快照结构不符合预期 → 服务端兜底
     }
-    exportViaServer(sessionId, partial)
+    exportViaServer(sessionId, partial, listTitle)
   }
   return h('button', {
     className: 'dsh-gc-btn',
