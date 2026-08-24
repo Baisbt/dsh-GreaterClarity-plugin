@@ -11,7 +11,7 @@ const API = '/dsh-greater-clarity'
 interface Settings {
   plugin: { enabled: boolean }
   ui: { foldGlobal: 'expanded' | 'folded' }
-  export: { showButton: boolean; mode: string; targetDir: string }
+  export: { showButton: boolean }
   ai: { showAvatar: boolean; avatarPath: string; avatarSize: number; historyCount: number }
 }
 
@@ -19,7 +19,7 @@ interface Settings {
 let settings: Settings = {
   plugin: { enabled: true },
   ui: { foldGlobal: 'expanded' },
-  export: { showButton: true, mode: 'download', targetDir: '' },
+  export: { showButton: true },
   ai: { showAvatar: true, avatarPath: '', avatarSize: 32, historyCount: 10 },
 }
 let foldGlobal: 'expanded' | 'folded' = 'expanded'
@@ -27,13 +27,16 @@ let settingsOpen = false
 let busyExport = false
 let avatarVersion = 0
 let historyOpen = false
-// 锚点几何（含右边界）：面板左侧放不下时可翻转 到锚点右侧 展开。
-let lastAvatarRect = { left: 0, top: 0, right: 0 }
+// 锚点几何：面板水平恒紧贴锚点头像左侧（右缘 = 头像左缘 - 8）。
+let lastAvatarRect = { left: 0, top: 0 }
 // 快速定位跳转的辅助状态。
 let jumpGen = 0 // 跳转代际：新跳转让旧的停稳回调作废，杜绝连点错乱
-let panelAnimPending = false // 仅跳转重吸附时启用一次平滑过渡；打开瞬间不播动画
-let panelH = 320 // 实测面板高度缓存（渲染后测量，参与垂直边界钳制）
+let panelH = 320 // 实测面板高度缓存（渲染后测量，用于垂直居中）
 const JUMP_TOP_PAD = 12 // 跳转后行首距滚动容器顶部的留白
+// 回到顶部 + 自动加载更早。
+let backToTopBusy = false
+let backToTopGen = 0 // 代际令牌：新点击/切会话/关面板即取消旧加载
+const BACK_TO_TOP_MAX_PAGES = 500 // 安全上限（每页约 50 条）
 
 const listeners = new Set<() => void>()
 // 层同步钩子：由 apply 注册，使每次状态刷新都把 DOM 层对齐到 enabled 开关。
@@ -380,7 +383,7 @@ function applyFold(): void {
 }
 
 function openHistory(rect: DOMRect): void {
-  lastAvatarRect = { left: rect.left, top: rect.top, right: rect.right }
+  lastAvatarRect = { left: rect.left, top: rect.top }
   historyOpen = true
   notify()
 }
@@ -563,14 +566,8 @@ function ExportPane() {
       ),
       h(Toggle, {
         checked: s.export.showButton,
-        onChange: (v) => saveSettings({ export: { ...s.export, showButton: v } }),
+        onChange: (v) => saveSettings({ export: { showButton: v } }),
       }),
-    ),
-    h('div', { className: 'dsh-gc-row' },
-      h('div', null,
-        h('div', { className: 'dsh-gc-label' }, '导出路径'),
-        h('div', { className: 'dsh-gc-hint' }, '浏览器默认下载目录（浏览器安全限制，无法自定义）'),
-      ),
     ),
   )
 }
@@ -883,70 +880,49 @@ function HistoryPanel({ useSession, onClose }: { useSession: any; onClose: () =>
     } else {
       row.scrollIntoView({ block: 'start', behavior: 'smooth' })
     }
-    // 停稳后重吸附：头像在视口内 → 与直接点击同几何；不在（长输入底部头像滚出屏）→ 锚定行首左侧。
+    // 停稳后重吸附：锚点 X 依次回退 目标行头像左缘（视口内）→ sticky 头像左缘 → 行首左缘。
     waitForScrollSettle(() => {
       if (gen !== jumpGen) return
       let anchorLeft = 0
       let anchorTop = 0
-      let anchorRight = 0
       const img = row!.querySelector<HTMLElement>(':scope > .dsh-gc-avatarwrap .dsh-gc-avatar')
       if (img) {
         const r = img.getBoundingClientRect()
         if (r.width > 0 && r.top >= 8 && r.bottom <= window.innerHeight - 8) {
           anchorLeft = r.left
           anchorTop = r.top
-          anchorRight = r.right
         }
       }
       if (anchorLeft === 0 && anchorTop === 0) {
-        // 行首锚点视为零宽点：right 取左缘，翻转展开由边界钳制兜底。
+        const sticky = document.querySelector<HTMLElement>('.dsh-gc-sticky')
+        if (sticky && sticky.style.display !== 'none') {
+          const sr = sticky.getBoundingClientRect()
+          if (sr.width > 0) {
+            anchorLeft = sr.left
+            anchorTop = sr.top
+          }
+        }
+      }
+      if (anchorLeft === 0 && anchorTop === 0) {
         const rr = row!.getBoundingClientRect()
         anchorLeft = rr.left
         anchorTop = rr.top
-        anchorRight = rr.left
       }
-      panelAnimPending = true
-      lastAvatarRect = { left: anchorLeft, top: anchorTop, right: anchorRight }
+      lastAvatarRect = { left: anchorLeft, top: anchorTop }
       notify()
     })
   }
 
   const PANEL_W = 300
-  // 左侧展开优先（与直接点击头像的几何一致）；空间不足（如顶部 sticky 头像贴着屏幕左缘）
-  // 时翻转到锚点右侧 8px 处展开，消除吸附后的水平偏移与遮挡。
+  // 水平：紧贴 AI 头像左侧（右缘 = 头像左缘 - 8）；头像尺寸变化时随其左缘像素级偏移。
   let left = lastAvatarRect.left - PANEL_W - 8
-  if (left < 8) {
-    const anchorRight = lastAvatarRect.right > lastAvatarRect.left ? lastAvatarRect.right : lastAvatarRect.left + 24
-    left = anchorRight + 8
-  }
   left = Math.max(8, Math.min(left, window.innerWidth - PANEL_W - 8))
-  // 垂直边界：用实测面板高度钳制，保证完整可见。
-  const maxTop = Math.max(8, window.innerHeight - panelH - 8)
-  let top = Math.max(8, Math.min(lastAvatarRect.top, maxTop))
-  // 避让顶部 sticky 头像：面板与其相交时下移到头像下方（放不下则上移到其上方），
-  // 杜绝面板压住自动生成的顶部头像。
-  const sticky = document.querySelector<HTMLElement>('.dsh-gc-sticky')
-  if (sticky && sticky.style.display !== 'none') {
-    const sr = sticky.getBoundingClientRect()
-    if (sr.width > 0 && sr.height > 0) {
-      const intersects = left < sr.right + 4 && left + PANEL_W > sr.left - 4 && top < sr.bottom + 4 && top + panelH > sr.top - 4
-      if (intersects) {
-        const below = sr.bottom + 8
-        const above = sr.top - panelH - 8
-        if (below + panelH <= window.innerHeight - 8) top = Math.max(8, below)
-        else if (above >= 8) top = above
-      }
-    }
-  }
-  // 仅跳转重吸附时播放平移动画；打开瞬间瞬时定位。
-  const anim = panelAnimPending ? 'left 0.26s ease, top 0.26s ease' : 'none'
+  // 垂直：窗口中心固定为屏幕中间高度，不随头像位置或其他因素变化。
+  const top = Math.max(8, Math.round((window.innerHeight - panelH) / 2))
 
   useEffect(() => {
     const el = panelRef.current
     if (el && el.offsetHeight > 100) panelH = el.offsetHeight
-    if (!panelAnimPending) return
-    const t = window.setTimeout(() => { panelAnimPending = false }, 320)
-    return () => window.clearTimeout(t)
   })
 
   // 回到顶部：滚动容器置顶（全量历史已加载时即最早消息）；容器缺失回退首行定位。
@@ -960,7 +936,7 @@ function HistoryPanel({ useSession, onClose }: { useSession: any; onClose: () =>
     if (first) first.scrollIntoView({ block: 'start', behavior: 'smooth' })
   }
 
-  return h('div', { ref: panelRef, className: 'dsh-gc-history', style: { left: left + 'px', top: top + 'px', transition: anim } },
+  return h('div', { ref: panelRef, className: 'dsh-gc-history', style: { left: left + 'px', top: top + 'px' } },
     h('div', { className: 'dsh-gc-history-topbar' },
       h('button', { className: 'dsh-gc-top-btn', onClick: scrollToTop, title: '定位到会话最顶部' }, '回到顶部'),
     ),
@@ -1104,7 +1080,7 @@ function Buttons({ sessionId, useSession }: { sessionId?: string; useSession?: a
       ? createPortal(h(SettingsModal, { onClose: () => { settingsOpen = false; notify() } }), document.body)
       : null,
     store.historyOpen && useSession
-      ? createPortal(h(HistoryPanel, { useSession, onClose: () => { historyOpen = false; notify() } }), document.body)
+      ? createPortal(h(HistoryPanel, { sessionId, useSession, onClose: () => { historyOpen = false; notify() } }), document.body)
       : null,
   )
 }

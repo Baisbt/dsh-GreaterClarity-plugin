@@ -39,8 +39,6 @@ const MAX_BODY_BYTES = 20 * 1024 * 1024
 
 interface ExportSettings {
   showButton: boolean
-  mode: string
-  targetDir: string
 }
 interface AiSettings {
   showAvatar: boolean
@@ -65,7 +63,7 @@ interface Settings {
 const DEFAULT_SETTINGS: Settings = {
   plugin: { enabled: true },
   ui: { foldGlobal: 'expanded' },
-  export: { showButton: true, mode: 'download', targetDir: '' },
+  export: { showButton: true },
   ai: { showAvatar: true, avatarPath: '', avatarSize: 32, historyCount: 10 },
 }
 
@@ -243,14 +241,6 @@ function imageLabel(attachment: any): string {
   const id = attachment && typeof attachment.attachmentId === 'string' ? attachment.attachmentId : ''
   if (id) return id.replace(/^sha256:/, '') + '.bin'
   return '附件'
-}
-
-function textOf(blocks: readonly BlockLike[] | undefined): string {
-  if (!Array.isArray(blocks)) return ''
-  return blocks
-    .filter((b) => b && b.type === 'text' && typeof b.text === 'string')
-    .map((b) => b.text as string)
-    .join('')
 }
 
 function pad(n: number): string {
@@ -435,8 +425,6 @@ export function apply(ctx: AppContext): void {
             },
             export: {
               showButton: typeof expIn.showButton === 'boolean' ? expIn.showButton : cur.export.showButton,
-              mode: typeof expIn.mode === 'string' ? expIn.mode : cur.export.mode,
-              targetDir: typeof expIn.targetDir === 'string' ? expIn.targetDir : cur.export.targetDir,
             },
             ai: {
               showAvatar: typeof aiIn.showAvatar === 'boolean' ? aiIn.showAvatar : cur.ai.showAvatar,
