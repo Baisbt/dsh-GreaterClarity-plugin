@@ -62,7 +62,7 @@ export function Buttons({ sessionId, useSession }: { sessionId?: string; useSess
           ? h(ExportButton, { sessionId, useSession, busy: store.busyExport })
           : h('button', {
             className: 'dsh-gc-btn',
-            onClick: () => exportViaServer(sessionId, false),
+            onClick: () => exportViaServer(sessionId),
             disabled: !sessionId || store.busyExport,
             title: '导出 Markdown',
           }, store.busyExport ? '导出中…' : '导出'))

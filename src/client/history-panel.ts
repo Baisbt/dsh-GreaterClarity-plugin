@@ -3,7 +3,7 @@
  * 持续悬停：仅随「历史」按钮 toggle 开/关。位置锚定在按钮正下方。
  */
 import { createElement as h, useState, useEffect, useRef, useMemo } from 'react'
-import { getSettings, getPanelH, setPanelH, JUMP_TOP_PAD } from './state.js'
+import { getSettings, getPanelH, setPanelH, JUMP_TOP_PAD, notify } from './state.js'
 import { clampHistoryCount } from '../pure/settings-spec.js'
 import { userNodeText } from '../pure/rounds.js'
 import { roundForNodeKey } from './dom-layer.js'
@@ -71,6 +71,13 @@ export function HistoryPanel({ anchorRef, useSession, onClose }: { anchorRef: { 
     const el = panelRef.current
     if (el && el.offsetHeight > 100) setPanelH(el.offsetHeight)
   })
+
+  // 窗口缩放/屏幕变更时重算按钮锚定位置（面板随渲染即时校正）。
+  useEffect(() => {
+    const onResize = (): void => { notify() }
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
 
   // 回到顶部：滚动容器置顶（全量历史已加载时即最早消息）；容器缺失回退首行定位。
   const scrollToTop = (): void => {

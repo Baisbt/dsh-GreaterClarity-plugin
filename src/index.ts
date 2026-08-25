@@ -278,13 +278,8 @@ export function apply(ctx: AppContext): void {
         const now = typeof payload.now === 'number' ? payload.now : Date.now()
         const tzOffsetMin = typeof payload.tzOffsetMin === 'number' ? payload.tzOffsetMin : -new Date().getTimezoneOffset()
         const markdown = buildMarkdown(snapshot.events, title, snapshot.session.createdAt, now, tzOffsetMin)
-        // 文件名：会话存在未加载完全的历史时加前缀；时间戳取客户端本地日期（点分）。
-        const filename = exportFilename({
-          partial: payload.partial === true,
-          now,
-          tzOffsetMin,
-          title,
-        })
+        // 文件名：宿主读盘即全量事件，恒无「未加载完全」前缀；时间戳取客户端本地日期（点分）。
+        const filename = exportFilename({ partial: false, now, tzOffsetMin, title })
         res.writeHead(200, JSON_HEADERS)
         res.end(JSON.stringify({ ok: true, markdown, filename }))
       } catch (err) {

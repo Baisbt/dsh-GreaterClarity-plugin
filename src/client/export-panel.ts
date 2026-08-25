@@ -16,12 +16,12 @@ function triggerDownload(markdown: string, filename: string): void {
   setTimeout(() => { URL.revokeObjectURL(url) }, 1000)
 }
 
-/** 服务端兜底导出：Host 读盘构建完整文档（客户端快照不可用时走这里）。 */
-export function exportViaServer(sessionId: string | undefined, partial: boolean, title?: string): void {
+/** 服务端兜底导出：Host 读盘构建全量文档（客户端快照不可用时走这里）；宿主文件恒完整，无前缀。 */
+export function exportViaServer(sessionId: string | undefined, title?: string): void {
   if (!sessionId || getBusyExport()) return
   setBusyExport(true)
   notify()
-  fetchJson('/export', { method: 'POST', body: JSON.stringify({ sessionId, now: Date.now(), tzOffsetMin: -new Date().getTimezoneOffset(), partial, title }) })
+  fetchJson('/export', { method: 'POST', body: JSON.stringify({ sessionId, now: Date.now(), tzOffsetMin: -new Date().getTimezoneOffset(), title }) })
     .then((d) => {
       if (d && d.ok && d.markdown) {
         triggerDownload(d.markdown, d.filename || '会话.md')
@@ -70,7 +70,7 @@ export function ExportButton({ sessionId, useSession, busy }: { sessionId?: stri
     } catch {
       // 快照结构不符合预期 → 服务端兜底
     }
-    exportViaServer(sessionId, partial, listTitle)
+    exportViaServer(sessionId, listTitle)
   }
   return h('button', {
     className: 'dsh-gc-btn',

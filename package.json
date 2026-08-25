@@ -1,6 +1,6 @@
 {
   "name": "@dsh-external/dsh-greater-clarity",
-  "version": "0.10.1",
+  "version": "0.10.2",
   "description": "DSH Web 会话增强插件：全局折叠 AI 思考链/工具链、一键导出 Markdown、AI 头像与手动折叠（思考链+工具链三态折叠）、设置弹窗。",
   "keywords": [
     "dsh",
@@ -54,7 +54,7 @@
     }
   },
   "peerDependencies": {
-    "cordis": ">=4.0.0-rc <5"
+    "cordis": "*"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",

@@ -57,9 +57,14 @@ export function fetchJson(path: string, init?: RequestInit): Promise<any> {
   }).then((r) => r.json())
 }
 
+// 设置请求序号：并发 load/save 时仅采纳最新一次的响应，旧响应丢弃（防乱序覆盖）。
+let settingsReqSeq = 0
+
 export function loadSettings(): void {
+  const seq = ++settingsReqSeq
   fetchJson('/settings')
     .then((d) => {
+      if (seq !== settingsReqSeq) return
       if (d && d.ok && d.settings) {
         settings = mergeSettings(settings, d.settings)
         // 还原持久化的全局折叠状态（跨页面/服务重启）。
@@ -71,10 +76,12 @@ export function loadSettings(): void {
 }
 
 export function saveSettings(patch: Partial<Settings>): void {
+  const seq = ++settingsReqSeq
   settings = mergeSettings(settings, patch)
   notify()
   fetchJson('/settings', { method: 'POST', body: JSON.stringify(patch) })
     .then((d) => {
+      if (seq !== settingsReqSeq) return
       if (d && d.ok && d.settings) {
         settings = mergeSettings(settings, d.settings)
         notify()
