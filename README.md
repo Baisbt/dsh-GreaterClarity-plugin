@@ -53,7 +53,15 @@ dsh-GreaterClarity-plugin/
 
 ## 安装
 
-### 方式 A：官方装配
+### 方式 A：从 GitHub 源码安装（外部用户推荐）
+
+```sh
+dsh plugin --profile web add github:Baisbt/dsh-GreaterClarity-plugin
+```
+
+首次安装 pnpm 会拦截 `prepare` 构建脚本（allowBuilds 授权，源码安装的标准流程）：把 pnpm 打印的 `@dsh-external/dsh-greater-clarity@...` 键**原样**加入该 profile 的 `pnpm-workspace.yaml`（`allowBuilds: "<键>": true`；键随解析方式存在 git/codeload 两种形态，可同时保留多把），然后重跑一次安装命令即可。装入 **web profile**（含 `dsh-web-app`，提供本插件依赖的 webServer 服务）。
+
+### 方式 B：本地目录 / npm
 
 ```powershell
 dsh plugin --profile web add <本目录绝对路径>
@@ -61,7 +69,7 @@ dsh plugin --profile web add <本目录绝对路径>
 dsh plugin --profile web add @dsh-external/dsh-greater-clarity
 ```
 
-### 方式 B：运行时注入（开发）
+### 方式 C：运行时注入（开发）
 
 ```powershell
 # 在 DSH 会话内使用注入器工具：
