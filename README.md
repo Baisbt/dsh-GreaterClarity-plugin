@@ -26,10 +26,27 @@ dsh-GreaterClarity-plugin/
 ├── package.json          # dsh.bundle.patch + dsh.client.inject/platform + peerDeps 范围声明
 ├── cordis.patch.yml      # 官方 dsh plugin add 的 insert 挂载声明
 ├── tsconfig.json         # NodeNext，exclude src/client
+├── tsconfig.test.json    # 测试编译配置（src/pure + tests → build-test/）
 ├── tsdown.config.ts      # host 自包含 ESM + client CJS(ModuleLoader banner)
 ├── scripts/build.sh      # junction link + tsc 编译 host
-├── src/index.ts          # HOST：webServer 路由 + 设置持久化 + Markdown 导出
-├── src/client/index.ts   # CLIENT：按钮、设置弹窗、折叠 CSS、头像层、导出触发
+├── LICENSE               # MIT
+├── src/
+│   ├── index.ts          # HOST：webServer 路由 + 设置持久化（纯逻辑引用 src/pure）
+│   ├── pure/             # 双端共享纯函数（单一事实源，node:test 覆盖）
+│   │   ├── markdown.ts       # 转义/事件流导出构建/文件名净化/时间格式
+│   │   ├── rounds.ts         # 快照轮次采集/轮次映射/直出构建
+│   │   └── settings-spec.ts  # 设置模型/净化/合并/clamp
+│   └── client/
+│       ├── index.ts          # CLIENT 入口：apply（样式/DOM 层装卸/slot 注册）
+│       ├── state.ts          # 共享状态 + 宿主通信 + 设置同步
+│       ├── use-store.ts      # React 订阅钩子
+│       ├── styles.ts         # 主题 token CSS
+│       ├── dom-layer.ts      # 头像/折叠 DOM 层 + 轮次映射缓存
+│       ├── export-panel.ts   # 导出按钮（直出+兜底）
+│       ├── history-panel.ts  # 历史快速定位面板
+│       ├── settings-modal.ts # 设置弹窗
+│       └── buttons.ts        # 会话头部按钮区
+├── tests/                # node:test 单测（pure 层）
 ├── assets/DSH_Avatar.png # 默认头像
 └── README.md
 ```
@@ -86,6 +103,15 @@ npm run build:client         # tsdown 打包 host + client
 - **头像路径白名单**：设置中的 `avatarPath` 仅接受 `$DSH_HOME/greater-clarity/` 目录内的图片文件（安全约束，目录外路径会静默回退到上传头像 / 默认头像）；此前配置过外部路径的用户需把文件移入该目录或改用上传功能。
 
 ## 更新记录
+
+### 0.10.0 架构解耦重构（行为不变）
+
+1. **`src/pure/` 共享纯函数层**：转义/导出构建/文件名/轮次映射/设置模型抽取为双端共享单一事实源，消除 Host/Client 四处手工同步的副本；`buildMarkdown` 与 `snapshotToMarkdown` 统一装配段（`roundsToMarkdown`），并顺带修复头部「对话轮数」与实际轮数不一致的旧问题。
+2. **设置模型单一事实源**：`settings-spec.ts` 提供类型/默认值/逐字段净化/合并/clamp，Host 净化与 Client 合并共享同一实现，新增设置字段触点从 6 处降至 2 处。
+3. **Client 拆分 7 模块**：state / use-store / styles / dom-layer / export-panel / history-panel / settings-modal / buttons（752 行巨石 → 职责单一模块）。
+4. **轮次映射 DOM 层自持**：映射改由 dom-layer 经 sessions 服务自持刷新（Buttons 仅注入当前会话 id），解除对 React 渲染副作用的隐式依赖——导出按钮隐藏/面板未开时头像标签依然正确。
+5. **测试基建**：`tests/` + `node:test`（`npm test`），pure 层 40+ 断言固化（转义向量/轮次语义/导出构建/设置净化/文件名规则）。
+6. 版本号 0.9.1 → 0.10.0；行为无变化（纯结构重构）。
 
 ### 0.9.1 面板持久悬停 + 导出标题对齐侧栏
 
