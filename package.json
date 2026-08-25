@@ -1,6 +1,6 @@
 {
   "name": "@dsh-external/dsh-greater-clarity",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "description": "DSH Web 会话增强插件：全局折叠 AI 思考链/工具链、一键导出 Markdown、AI 头像与手动折叠（思考链+工具链三态折叠）、设置弹窗。",
   "keywords": [
     "dsh",
@@ -64,6 +64,7 @@
   "scripts": {
     "build": "bash scripts/build.sh",
     "build:client": "tsdown",
+    "prepare": "tsdown",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsc -p tsconfig.test.json && node --test \"build-test/tests/*.test.js\""
   }
